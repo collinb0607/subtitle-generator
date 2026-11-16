@@ -1662,6 +1662,12 @@ def reveal_file(path):
         pass
 
 
+def _say(text):
+    """Self-test progress, for the build log (a windowed Windows app has no stderr)."""
+    if sys.stderr:
+        print(f"[self-test {time.strftime('%H:%M:%S')}] {text}", file=sys.stderr, flush=True)
+
+
 def self_test():
     """Used by the release build: exit code 0 if the packaged app can download the
     Fast model, read a video's sound, run Whisper on it, burn in captions and add a
@@ -1682,11 +1688,16 @@ def self_test():
             return 4
         cfg = MODELS["Fast — Whisper small"]
         if not model_ready(cfg):
+            _say("downloading the Fast model")
             download_model(cfg, lambda d, t: None, lambda: None)
         audio = read_audio(ffmpeg, video, lambda: None)
-        model = WhisperModel(model_dir(cfg), device="cpu", compute_type="int8")
-        segments, _ = model.transcribe(audio, word_timestamps=True, vad_filter=True)
-        list(segments)  # a tone has no words; this checks the whole pipeline runs
+        _say(f"read {len(audio) / SAMPLE_RATE:.1f} s of sound; loading Whisper")
+        model = WhisperModel(model_dir(cfg), device="cpu", compute_type="int8", cpu_threads=os.cpu_count() or 4)
+        for vad in (False, True):
+            _say(f"transcribing (voice detection {'on' if vad else 'off'})")
+            segments, _ = model.transcribe(audio, word_timestamps=True, vad_filter=vad)
+            list(segments)  # a tone has no words; this checks the whole pipeline runs
+        _say("Whisper OK; burning in captions")
         caps = build_captions([(0.2, 0.6, " Hello"), (0.7, 1.0, " there,"), (1.1, 1.6, " everyone."),
                                (1.8, 2.2, " Again.")], list(CAPTION_MODES)[0])
         if len(caps) != 2 or caps[0]["text"] != "Hello there, everyone." or parse_subtitles(to_srt(caps)) != \
@@ -1713,6 +1724,7 @@ def self_test():
                         "-c", "copy", "-c:s", "mov_text", track], check=True, capture_output=True, **_POPEN_FLAGS)
         if "Subtitle: mov_text" not in probe_text(ffmpeg, track):
             return 7
+        _say("videos OK; loading drag and drop")
         root = tk.Tk()
         root.withdraw()
         from tkinterdnd2 import TkinterDnD

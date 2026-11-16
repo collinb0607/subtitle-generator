@@ -53,6 +53,7 @@ jobs:
       # (a missing module or library makes a frozen app quit at once).
       - name: Smoke test (Windows)
         if: runner.os == 'Windows'
+        timeout-minutes: 20
         run: |
           $p = Start-Process ./${{ matrix.asset }} -PassThru
           Start-Sleep 20
@@ -63,6 +64,7 @@ jobs:
           if ($t.ExitCode -ne 0) { throw "Self-test failed with code $($t.ExitCode)" }
       - name: Smoke test (macOS)
         if: runner.os == 'macOS'
+        timeout-minutes: 20
         run: |
           "dist/Subtitle Generator.app/Contents/MacOS/Subtitle Generator" &
           pid=$!
