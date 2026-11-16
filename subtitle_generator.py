@@ -1730,6 +1730,7 @@ def self_test():
         from tkinterdnd2 import TkinterDnD
         TkinterDnD.require(root)
         root.destroy()
+        _say("drag and drop OK")
         return 0
     except Exception as e:
         log_error(f"Self-test failed: {type(e).__name__}: {e}")
@@ -1741,9 +1742,23 @@ def probe_text(ffmpeg, path):
                           errors="replace", **_POPEN_FLAGS).stderr
 
 
+def quit_now(code):
+    """End the process. Whisper's engine (CTranslate2) can leave worker threads that keep
+    a finished program from exiting on macOS, so skip the slow, hang-prone cleanup:
+    every file has already been written and closed by this point."""
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.flush()
+        except Exception:
+            pass
+    os._exit(code)
+
+
 def main():
     if "--self-test" in sys.argv:
-        sys.exit(self_test())
+        code = self_test()
+        _say(f"finished with code {code}")
+        quit_now(code)
     root = tk.Tk()
     try:  # nicer native look where available
         ttk.Style().theme_use("vista" if sys.platform == "win32" else "aqua" if sys.platform == "darwin" else "clam")
@@ -1756,6 +1771,7 @@ def main():
     if files:
         root.after(300, lambda: app._on_drop(files))
     root.mainloop()
+    quit_now(0)
 
 
 if __name__ == "__main__":
