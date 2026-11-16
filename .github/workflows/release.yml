@@ -1,0 +1,93 @@
+# Builds the downloadable apps and attaches them to a GitHub release.
+# Runs when a version tag is pushed:  git tag v1.0.1 && git push origin v1.0.1
+#
+# Each OS builds on its own runner because PyInstaller can't cross-compile:
+# a Mac app has to be built on a Mac.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:  # manual run from the Actions tab: builds only, no release
+
+permissions:
+  contents: write  # needed to create the release
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            asset: Subtitle-Generator-Windows.exe
+          - os: macos-latest  # Apple Silicon (M1 and newer)
+            asset: Subtitle-Generator-macOS.zip
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      # Pinned to the versions the Windows build was tested with.
+      - run: python -m pip install pyinstaller==6.22.3 faster-whisper==1.2.1 ctranslate2==4.9.0 av==19.0.2 onnxruntime==1.32.0 tokenizers==0.23.3 huggingface_hub==2.4.0 numpy==2.5.5 imageio-ffmpeg==0.8.1 pillow==13.0.0 certifi==2026.10.23 tkinterdnd2==0.7.0
+
+      # One file, no console window. CTranslate2's native libraries, faster-whisper's voice-detection
+      # model and imageio-ffmpeg's FFmpeg are collected explicitly; tkinterdnd2, onnxruntime and PyAV have
+      # PyInstaller hooks. The speech models (and NVIDIA's cuBLAS) are downloaded by the app, not bundled.
+      - name: Build (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          pyinstaller --noconfirm --onefile --windowed --name Subtitle-Generator --collect-all ctranslate2 --collect-data faster_whisper --collect-data imageio_ffmpeg subtitle_generator.py
+          Move-Item dist/Subtitle-Generator.exe ${{ matrix.asset }}
+
+      - name: Build (macOS)
+        if: runner.os == 'macOS'
+        # A .app bundle (one-dir: macOS apps are folders). ditto keeps the
+        # permissions and code signature that a plain zip would lose.
+        run: |
+          pyinstaller --noconfirm --windowed --name "Subtitle Generator" --collect-all ctranslate2 --collect-data faster_whisper --collect-data imageio_ffmpeg subtitle_generator.py
+          ditto -c -k --keepParent "dist/Subtitle Generator.app" ${{ matrix.asset }}
+
+      # Smoke test: the app must start and still be running after 20 s
+      # (a missing module or library makes a frozen app quit at once).
+      - name: Smoke test (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          $p = Start-Process ./${{ matrix.asset }} -PassThru
+          Start-Sleep 20
+          if ($p.HasExited) { throw "App exited early with code $($p.ExitCode)" }
+          Stop-Process -Id $p.Id -Force
+          # Downloads the Fast model, runs Whisper on a test video's sound, burns in captions, adds a subtitle track and loads drag and drop, inside the packaged app.
+          $t = Start-Process ./${{ matrix.asset }} -ArgumentList "--self-test" -PassThru -Wait
+          if ($t.ExitCode -ne 0) { throw "Self-test failed with code $($t.ExitCode)" }
+      - name: Smoke test (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          "dist/Subtitle Generator.app/Contents/MacOS/Subtitle Generator" &
+          pid=$!
+          sleep 20
+          kill -0 $pid || { echo "App exited early"; exit 1; }
+          kill $pid
+          # Downloads the Fast model, runs Whisper on a test video's sound, burns in captions, adds a subtitle track and loads drag and drop, inside the packaged app.
+          "dist/Subtitle Generator.app/Contents/MacOS/Subtitle Generator" --self-test || { echo "Self-test failed with code $?"; exit 1; }
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset }}
+          path: ${{ matrix.asset }}
+
+  release:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >
+          gh release create "${{ github.ref_name }}" Subtitle-Generator-Windows.exe Subtitle-Generator-macOS.zip
+          --repo "${{ github.repository }}" --title "Subtitle Generator ${{ github.ref_name }}" --generate-notes

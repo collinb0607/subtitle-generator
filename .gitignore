@@ -1,0 +1,17 @@
+*.mp4
+*.mov
+*.mkv
+*.webm
+*.mp3
+*.wav
+*.srt
+*.vtt
+*.ass
+*.png
+*.part
+!docs/*.gif
+build/
+dist/
+*.spec
+__pycache__/
+*.pyc
