@@ -107,6 +107,12 @@ Speech recognition is [Whisper](https://github.com/openai/whisper) by OpenAI (MI
 [libass](https://github.com/libass/libass). NVIDIA's cuBLAS is downloaded from NVIDIA's own package,
 under NVIDIA's licence, only if you choose the graphics card.
 
+## Support this project
+This app is free, with no ads, accounts or limits. If it saved you time or a subscription, you can
+support its development on Ko-fi:
+
+[![Support me on Ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/collinbrooksdev)
+
 ## Part of the Offline Toolkit
 Also by me: [GIF Maker](https://github.com/collinb0607/gif-maker),
 [Video Compressor](https://github.com/collinb0607/video-compressor),

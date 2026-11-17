@@ -994,8 +994,12 @@ class SubtitleApp:
         self.progress.grid(row=0, column=0, sticky="ew", padx=(0, 6))
         self.cancel_btn = ttk.Button(f, text="Cancel", command=self.cancel, state="disabled")
         self.cancel_btn.grid(row=0, column=1)
-        self.status = ttk.Label(main, text="Ready.", wraplength=1000)
-        self.status.grid(row=5, column=0, sticky="w", **pad)
+        foot = ttk.Frame(main)  # the status line, with the support link on its right
+        foot.grid(row=5, column=0, sticky="ew", **pad)
+        foot.columnconfigure(0, weight=1)
+        self.status = ttk.Label(foot, text="Ready.", wraplength=850)
+        self.status.grid(row=0, column=0, sticky="w")
+        support_link(foot).grid(row=0, column=1, sticky="ne", padx=(12, 0))
 
     # ---- settings helpers ------------------------------------------------ #
     def _on_model(self):
@@ -1752,6 +1756,19 @@ def quit_now(code):
         except Exception:
             pass
     os._exit(code)
+
+
+SUPPORT_URL = "https://ko-fi.com/collinbrooksdev"
+
+
+def support_link(parent, bg=None, font=None):
+    """A small "Support this project" link that opens the Ko-fi page in the browser."""
+    import webbrowser
+    kw = {"bg": bg} if bg else {}
+    link = tk.Label(parent, text="\u2665 Support this project", fg="#c8364f", cursor="hand2",
+                    font=font or ("", 9, "underline"), **kw)
+    link.bind("<Button-1>", lambda e: webbrowser.open(SUPPORT_URL))
+    return link
 
 
 def main():
