@@ -1037,10 +1037,10 @@ def header(parent, on_support):
             k = (i / (steps - 1)) ** 2.2  # mostly purple, turning blue on the right
             col = "#%02x%02x%02x" % tuple(round(a[j] + (b[j] - a[j]) * k) for j in range(3))
             c.create_rectangle(i * w / steps, 0, (i + 1) * w / steps + 1, 64, fill=col, outline=col)
-        # The logo: a white speech bubble with "CC".
-        c.create_polygon(18, 14, 52, 14, 56, 18, 56, 40, 52, 44, 30, 44, 22, 51, 24, 44, 18, 44, 14, 40, 14, 18,
-                         smooth=True, fill="#ffffff", outline="#ffffff")
-        c.create_text(35, 29, text="CC", fill=t["purple2"], font=(fam, 12, "bold"))
+        # The logo: the app's own icon.
+        if not hasattr(c, "_logo"):
+            c._logo = tk.PhotoImage(master=c, data=HEADER_ICON)
+        c.create_image(36, 32, image=c._logo)
         c.create_text(70, 22, text="Subtitle Generator", anchor="w", fill="#ffffff", font=(fam, 16, "bold"))
         c.create_text(71, 44, text="AI subtitles on your own computer · free, private, no limits", anchor="w",
                       fill="#cfc6ff", font=(fam, 9))
@@ -2843,6 +2843,53 @@ APP_ICON = (
     "HvczV4Zk4at7dTaXY3StEv+l5FnZLR2K9aUwdDGRdAKUKnm11X/Rkbl0SZoJ0ddsQ9dT+LXZ0DVBDY9jfRKIqSCsjhCn9sPw"
     "nr1fH/d2PLXj9/VSMnLC+KAfOeFsVn6fL0+XrEBQdim4r2/r6Pcuei+S1HZz+2xI94urBKO8LB0//g9Ti5z4B8BBLgAAAABJ"
     "RU5ErkJggg=="
+)
+
+# The same icon, small, for the app's header bar.
+HEADER_ICON = (
+    "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"
 )
 
 
