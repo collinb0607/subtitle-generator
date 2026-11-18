@@ -128,6 +128,8 @@ Speech recognition is [Whisper](https://github.com/openai/whisper) by OpenAI (MI
 cuBLAS is downloaded from NVIDIA's own package,
 under NVIDIA's license, only if you choose the graphics card.
 
+The icons are from [Lucide](https://lucide.dev) (ISC license, see [assets/LUCIDE-LICENSE.txt](assets/LUCIDE-LICENSE.txt)).
+
 ## Support this project
 This app is free, with no ads, accounts or limits. If it saved you time or a subscription, you can
 support its development on Ko-fi:
