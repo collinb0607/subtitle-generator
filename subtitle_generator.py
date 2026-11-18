@@ -15,11 +15,12 @@ Requirements:
     Python 3.9+ (with Tkinter, included in the python.org installers)
     faster-whisper  -> Whisper speech recognition (CTranslate2)
     imageio-ffmpeg  -> bundles an FFmpeg binary: reads the sound, burns in and adds subtitles
-    Pillow          -> shows the preview
+    Pillow          -> the player's picture
+    sounddevice     -> the player's sound (optional: the player is silent without it)
     certifi         -> trusted certificates for downloading the models
     tkinterdnd2     -> drag and drop (optional: the app works without it)
     The app offers to install them on first run. Manual install, using the Python that runs the app:
-        python -m pip install faster-whisper imageio-ffmpeg pillow certifi tkinterdnd2
+        python -m pip install faster-whisper imageio-ffmpeg pillow certifi sounddevice tkinterdnd2
 
 Run:
     python subtitle_generator.py
@@ -36,13 +37,14 @@ import tempfile
 import threading
 import time
 import tkinter as tk
+import tkinter.font as tkfont
 from tkinter import colorchooser, filedialog, messagebox, ttk
 
 # Filled in by load_libraries(), so the window can still open (and offer to
 # install them) when they're missing.
 np = WhisperModel = Image = ImageTk = None
 
-PACKAGES = ["faster-whisper", "imageio-ffmpeg", "pillow", "certifi", "tkinterdnd2"]
+PACKAGES = ["faster-whisper", "imageio-ffmpeg", "pillow", "certifi", "sounddevice", "tkinterdnd2"]
 VIDEO_EXTS = {".mp4", ".mov", ".m4v", ".mkv", ".webm", ".avi", ".wmv", ".flv", ".mts", ".m2ts", ".ts",
               ".3gp", ".mpg", ".mpeg"}
 AUDIO_EXTS = {".mp3", ".wav", ".m4a", ".aac", ".flac", ".ogg", ".opus", ".wma"}
@@ -115,6 +117,20 @@ FONTS = {"Arial": (("arial.ttf", "arialbd.ttf"), ("Arial.ttf", "Arial Bold.ttf")
 SIZES = {"Small": 0.045, "Medium": 0.06, "Large": 0.075, "Extra large": 0.095}  # of the picture's short side
 LOOKS = ["Outline", "Box behind the text", "Shadow only"]
 POSITIONS = {"Bottom": 2, "Middle": 5, "Top": 8}  # ASS alignment
+ANIMATIONS = ["None", "Highlight each word", "Words pop in", "One word at a time"]
+# One-click looks: every burned-in setting at once. Changing one afterwards shows "Custom".
+PRESETS = {
+    "Clean": dict(font="Arial", size="Medium", bold=True, colour="#ffffff", look="Outline",
+                  position="Bottom", animation="None", highlight="#4da3ff"),
+    "Karaoke": dict(font="Arial", size="Large", bold=True, colour="#ffffff", look="Outline",
+                    position="Bottom", animation="Highlight each word", highlight="#4da3ff"),
+    "Bold pop": dict(font="Impact", size="Extra large", bold=False, colour="#ffffff", look="Outline",
+                     position="Middle", animation="Words pop in", highlight="#ffd400"),
+    "One word": dict(font="Impact", size="Extra large", bold=False, colour="#ffd400", look="Outline",
+                     position="Middle", animation="One word at a time", highlight="#ffd400"),
+    "Boxed": dict(font="Arial", size="Medium", bold=False, colour="#ffffff", look="Box behind the text",
+                  position="Bottom", animation="None", highlight="#4da3ff"),
+}
 
 
 def load_libraries():
@@ -141,6 +157,10 @@ def load_libraries():
         import certifi  # noqa: F401
     except ImportError:
         missing.append("certifi")
+    try:
+        import sounddevice  # noqa: F401
+    except (ImportError, OSError):
+        missing.append("sounddevice")
     try:
         import tkinterdnd2  # noqa: F401
     except ImportError:
@@ -350,7 +370,8 @@ def build_captions(words, mode):
         if cur:
             text = joined(cur)
             if text:
-                caps.append(dict(start=cur[0][0], end=cur[-1][1], text=break_lines(text, m["line"], m["lines"])))
+                caps.append(dict(start=cur[0][0], end=cur[-1][1], text=break_lines(text, m["line"], m["lines"]),
+                                 words=[[st, en, raw.strip()] for st, en, raw in cur]))
             cur.clear()
     for start, end, raw in words:
         if not raw.strip():
@@ -388,6 +409,69 @@ def build_captions(words, mode):
         c["end"] = min(want, nxt - 0.04) if nxt is not None else want
         c["end"] = max(c["end"], c["start"] + 0.2)
     return caps
+
+
+# ---- each caption's words, and their times -------------------------------------------- #
+def _tokens(text):
+    """A caption's words, as shown (split at spaces and line breaks)."""
+    return text.split()
+
+
+def even_words(tokens, start, end):
+    """Times for words that have none: the caption's time shared out by their length."""
+    if not tokens:
+        return []
+    total = sum(len(t) for t in tokens) or 1
+    out, t = [], start
+    for tok in tokens:
+        d = (end - start) * len(tok) / total
+        out.append([t, t + d, tok])
+        t += d
+    return out
+
+
+def caption_words(c):
+    """The caption's words with times: its recognised ones if they still match the text,
+    else shared out evenly (an opened .srt, or text typed in)."""
+    words, tokens = c.get("words"), _tokens(c["text"])
+    if words and [w[2] for w in words] == tokens:
+        return [[max(c["start"], w[0]), min(c["end"], max(w[1], w[0])), w[2]] for w in words]
+    return even_words(tokens, c["start"], c["end"])
+
+
+def retime_words(old_words, new_text, start, end):
+    """Word times for edited text: words that didn't change keep their times; new ones
+    share out the time between their neighbours (by length)."""
+    import difflib
+    new = _tokens(new_text)
+    old = [w[2] for w in old_words]
+    out = [None] * len(new)
+    for a, b, n in difflib.SequenceMatcher(None, old, new, autojunk=False).get_matching_blocks():
+        for k in range(n):
+            out[b + k] = list(old_words[a + k])
+    i = 0
+    while i < len(new):
+        if out[i] is not None:
+            i += 1
+            continue
+        j = i
+        while j < len(new) and out[j] is None:
+            j += 1
+        lo = out[i - 1][1] if i > 0 else start
+        hi = out[j][0] if j < len(new) else end
+        if hi - lo < 0.05 * (j - i):  # no room between the kept words: share out the whole caption
+            return even_words(new, start, end)
+        out[i:j] = even_words(new[i:j], lo, hi)
+        i = j
+    return out
+
+
+def fit_words(words, old_start, old_end, start, end):
+    """Word times for a caption moved or resized from (old_start, old_end) to (start, end):
+    moved as they are if it only moved, else stretched or squeezed with it."""
+    span = (old_end - old_start) or 1.0
+    k = (end - start) / span
+    return [[start + (w[0] - old_start) * k, start + (w[1] - old_start) * k, w[2]] for w in words]
 
 
 def fmt_ts(t, sep=","):
@@ -463,9 +547,54 @@ def _ass_text(text):
     return text.replace("\\", "\u29f5").replace("{", "(").replace("}", ")").replace("\n", "\\N")
 
 
+def _ass_lines(c):
+    """The caption's words, each with whether a line break comes before it."""
+    out = []
+    for n, line in enumerate(c["text"].split("\n")):
+        for k, tok in enumerate(line.split()):
+            out.append((tok, n > 0 and k == 0))
+    return out
+
+
+def _animated_events(c, st):
+    """ASS events that animate a caption word by word, as libass draws them:
+    (start, end, text) for each moment between two words."""
+    words = caption_words(c)
+    toks = _ass_lines(c)
+    if not words or len(words) != len(toks):
+        return [(c["start"], c["end"], _ass_text(c["text"]))]
+    hi = "&H" + _ass_colour(st.get("highlight") or "#4da3ff")[4:]  # an override's colour: &HBBGGRR&
+    anim = st["animation"]
+    events = []
+    for i, w in enumerate(words):
+        start = c["start"] if i == 0 else w[0]
+        end = c["end"] if i == len(words) - 1 else max(words[i + 1][0], start + 0.01)
+        if anim == "One word at a time":
+            # The word pops: a little bigger, settling to its size.
+            text = "{\\fscx118\\fscy118\\t(0,90,\\fscx100\\fscy100)}" + _ass_text(w[2])
+        else:
+            parts = []
+            for k, (tok, newline) in enumerate(toks):
+                lead = "\\N" if newline else (" " if k else "")
+                word = _ass_text(tok)
+                if anim == "Highlight each word" and k == i:
+                    word = "{\\c" + hi + "&}" + word + "{\\r}"
+                elif anim == "Words pop in":
+                    if k == i:  # the newest word fades in, in the highlight colour
+                        word = "{\\alpha&HFF&\\c" + hi + "&\\t(0,80,\\alpha&H00&)}" + word + "{\\r}"
+                    elif k > i:  # words still to come keep their place but don't show, so nothing jumps
+                        word = "{\\alpha&HFF&}" + word + "{\\r}"
+                parts.append(lead + word)
+            text = "".join(parts)
+        events.append((start, end, text))
+    return events
+
+
 def to_ass(caps, width, height, st):
     """An Advanced SubStation file: the captions in the chosen look, for burning in."""
     size = max(8, round(min(width, height) * SIZES[st["size"]]))
+    if st.get("animation") == "One word at a time":
+        size = round(size * 1.35)  # a single word can be big
     look = st["look"]
     if look == "Box behind the text":
         border, outline, shadow, back = 3, max(2, round(size * 0.22)), 0, _ass_colour("#000000", 0x60)
@@ -483,8 +612,12 @@ def to_ass(caps, width, height, st):
     style = (f"Style: Default,{st['font']},{size},{_ass_colour(st['colour'])},&H000000FF,{outline_col},{back},"
              f"{-1 if st['bold'] else 0},0,0,0,100,100,0,0,{border},{outline},{shadow},{align},"
              f"{margin_h},{margin_h},{margin_v},1")
-    events = "\n".join(f"Dialogue: 0,{_ass_time(c['start'])},{_ass_time(c['end'])},Default,,0,0,0,,{_ass_text(c['text'])}"
-                       for c in caps)
+    lines = []
+    for c in caps:
+        evs = (_animated_events(c, st) if st.get("animation", "None") != "None"
+               else [(c["start"], c["end"], _ass_text(c["text"]))])
+        lines += [f"Dialogue: 0,{_ass_time(a)},{_ass_time(b)},Default,,0,0,0,,{t}" for a, b, t in evs]
+    events = "\n".join(lines)
     return (f"[Script Info]\nScriptType: v4.00+\nPlayResX: {width}\nPlayResY: {height}\nWrapStyle: 0\n"
             f"ScaledBorderAndShadow: yes\nYCbCr Matrix: None\n\n[V4+ Styles]\n"
             "Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, "
@@ -705,46 +838,573 @@ def enable_drag_and_drop(root, on_drop):
     return True
 
 
-class SoundPlayer:
-    """Plays a short WAV file without blocking, and stops it."""
-    def __init__(self):
-        self.proc = None
+# --------------------------------------------------------------------------- #
+#  The look: white cards on a faint lavender, a dark purple header, blue actions
+# --------------------------------------------------------------------------- #
+THEME = dict(
+    bg="#f3f1f9", card="#ffffff", border="#e2ddf0", text="#1c1433", muted="#6e6787",
+    purple="#2b1655", purple2="#4a2a8a", blue="#2f7cf6", blue_hover="#1d67dc", blue_soft="#e7f0ff",
+    blue_text="#1756c4", lavender="#d9ccff", lavender_line="#7b5cd6", disabled="#c9c4d8", now="#f1ecff",
+    video="#140b2b")
 
-    def play(self, path):
+
+def ui_family():
+    try:
+        families = set(tkfont.families())
+    except tk.TclError:
+        return "TkDefaultFont"
+    for name in ("Segoe UI", "SF Pro Text", "Helvetica Neue", "Inter", "Cantarell", "DejaVu Sans"):
+        if name in families:
+            return name
+    return "TkDefaultFont"
+
+
+def _indicator_images(root, style):
+    """Checkboxes and radio buttons drawn as images: a blue box with a white tick, a blue
+    ring with a dot (clam draws a tick as an X)."""
+    try:
+        from PIL import Image as PILImage, ImageDraw, ImageTk as PILImageTk
+    except ImportError:
+        return
+    t, n, k = THEME, 18, 4  # drawn 4x and shrunk, for smooth edges
+    big = n * k
+
+    def make(kind, on, enabled):
+        im = PILImage.new("RGBA", (big, big), (0, 0, 0, 0))
+        d = ImageDraw.Draw(im)
+        blue = t["blue"] if enabled else t["disabled"]
+        box = (k, k, big - k, big - k)
+        if kind == "check":
+            if on:
+                d.rounded_rectangle(box, radius=5 * k, fill=blue)
+                d.line([(5 * k, 9.5 * k), (8 * k, 12.5 * k), (13.5 * k, 6 * k)], fill="#ffffff", width=int(2.2 * k),
+                       joint="curve")
+            else:
+                d.rounded_rectangle(box, radius=5 * k, fill="#ffffff", outline=t["disabled"] if not enabled
+                                    else "#b9b0d6", width=int(1.4 * k))
+        else:
+            if on:
+                d.ellipse(box, fill="#ffffff", outline=blue, width=int(1.6 * k))
+                d.ellipse((6 * k, 6 * k, big - 6 * k, big - 6 * k), fill=blue)
+            else:
+                d.ellipse(box, fill="#ffffff", outline=t["disabled"] if not enabled else "#b9b0d6", width=int(1.4 * k))
+        return PILImageTk.PhotoImage(im.resize((n, n), PILImage.LANCZOS), master=root)
+    root._indicator_images = imgs = {(kind, on, en): make(kind, on, en) for kind in ("check", "radio")
+                                     for on in (False, True) for en in (False, True)}
+    for kind, widget in (("check", "Checkbutton"), ("radio", "Radiobutton")):
+        name = f"Card.{kind}.indicator"
+        try:
+            style.element_create(name, "image", imgs[(kind, False, True)],
+                                 ("disabled", "selected", imgs[(kind, True, False)]),
+                                 ("disabled", imgs[(kind, False, False)]),
+                                 ("selected", imgs[(kind, True, True)]), padding=(0, 0, 6, 0), sticky="")
+        except tk.TclError:
+            pass  # already made
+        style.layout(f"Card.T{widget}", [(f"{widget}.padding", {"sticky": "nswe", "children": [
+            (name, {"side": "left", "sticky": ""}),
+            (f"{widget}.focus", {"side": "left", "sticky": "w", "children": [
+                (f"{widget}.label", {"sticky": "nswe"})]})]})])
+
+
+def apply_theme(root):
+    """ttk's "clam" theme, recoloured (the native themes ignore colours)."""
+    t, fam = THEME, ui_family()
+    root.configure(bg=t["bg"])
+    s = ttk.Style(root)
+    s.theme_use("clam")
+    s.configure(".", background=t["bg"], foreground=t["text"], font=(fam, 10), bordercolor=t["border"],
+                focuscolor=t["blue"], lightcolor=t["card"], darkcolor=t["border"], troughcolor=t["bg"])
+    s.configure("Card.TFrame", background=t["card"])
+    s.configure("TLabel", background=t["bg"])
+    s.configure("Card.TLabel", background=t["card"])
+    s.configure("Muted.Card.TLabel", background=t["card"], foreground=t["muted"], font=(fam, 9))
+    s.configure("File.Card.TLabel", background=t["card"], foreground=t["text"], font=(fam, 11, "bold"))
+    s.configure("Status.TLabel", background=t["bg"], foreground=t["muted"], font=(fam, 9))
+    for name in ("Card.TLabel", "Muted.Card.TLabel", "File.Card.TLabel"):
+        s.map(name, background=[("disabled", t["card"])], foreground=[("disabled", t["disabled"])])
+    _indicator_images(root, s)
+    for kind in ("TCheckbutton", "TRadiobutton"):
+        s.configure(f"Card.{kind}", background=t["card"], foreground=t["text"], indicatorbackground=t["card"],
+                    indicatorforeground=t["blue"], upperbordercolor=t["border"], lowerbordercolor=t["border"])
+        s.map(f"Card.{kind}", background=[("active", t["card"])],
+              indicatorbackground=[("selected", t["blue"]), ("active", t["blue_soft"])],
+              indicatorforeground=[("selected", "#ffffff")],
+              foreground=[("disabled", t["disabled"])])
+    s.configure("TCombobox", fieldbackground="#ffffff", background="#ffffff", foreground=t["text"],
+                arrowcolor=t["purple2"], bordercolor=t["border"], padding=(6, 3), selectbackground="#ffffff",
+                selectforeground=t["text"])
+    s.map("TCombobox", fieldbackground=[("readonly", "#ffffff"), ("disabled", t["bg"])],
+          foreground=[("disabled", t["disabled"])], arrowcolor=[("disabled", t["disabled"])],
+          bordercolor=[("focus", t["blue"]), ("hover", t["lavender_line"])])
+    s.configure("TEntry", fieldbackground="#ffffff", bordercolor=t["border"], padding=(6, 3))
+    s.map("TEntry", bordercolor=[("focus", t["blue"])], fieldbackground=[("disabled", t["bg"])])
+    s.configure("TButton", background="#ffffff", foreground=t["purple2"], bordercolor=t["border"],
+                padding=(12, 5), font=(fam, 10, "bold"), relief="flat")
+    s.map("TButton", background=[("disabled", t["card"]), ("pressed", t["now"]), ("active", "#f5f1ff")],
+          foreground=[("disabled", t["disabled"])], bordercolor=[("active", t["lavender_line"])])
+    s.configure("Treeview", background="#ffffff", fieldbackground="#ffffff", foreground=t["text"],
+                rowheight=28, borderwidth=0, font=(fam, 10))
+    s.map("Treeview", background=[("selected", t["blue_soft"])], foreground=[("selected", t["blue_text"])])
+    s.configure("Treeview.Heading", background=t["card"], foreground=t["muted"], font=(fam, 9, "bold"),
+                relief="flat", borderwidth=0, padding=(6, 4))
+    s.map("Treeview.Heading", background=[("active", t["card"])])
+    s.configure("Horizontal.TProgressbar", troughcolor="#e9e5f5", background=t["blue"], bordercolor="#e9e5f5",
+                lightcolor=t["blue"], darkcolor=t["blue"], thickness=6)
+    s.configure("Vertical.TScrollbar", background="#ddd6ee", troughcolor=t["card"], bordercolor=t["card"],
+                arrowcolor=t["muted"], lightcolor="#ddd6ee", darkcolor="#ddd6ee", gripcount=0)
+    root.option_add("*TCombobox*Listbox.background", "#ffffff")
+    root.option_add("*TCombobox*Listbox.foreground", t["text"])
+    root.option_add("*TCombobox*Listbox.selectBackground", t["blue"])
+    root.option_add("*TCombobox*Listbox.selectForeground", "#ffffff")
+    root.option_add("*TCombobox*Listbox.font", (fam, 10))
+    return fam
+
+
+class PillButton(tk.Canvas):
+    """A rounded button: blue for the main actions, dark purple for the player."""
+    COLOURS = {"primary": ("blue", "blue_hover", "#ffffff"), "dark": ("purple2", "purple", "#ffffff")}
+
+    def __init__(self, parent, text, command, kind="primary", bg=None, height=38, padx=22, font=None):
+        bg = bg or THEME["card"]
+        self._font = tkfont.Font(font=font or (ui_family(), 11, "bold"))
+        width = self._font.measure(text) + 2 * padx
+        super().__init__(parent, width=width, height=height, bg=bg, highlightthickness=0, bd=0, cursor="hand2")
+        self.text, self.command, self.kind = text, command, kind
+        self.enabled, self.hover = True, False
+        self._bw, self._bh = width, height
+        self.bind("<Enter>", lambda e: self._set_hover(True))
+        self.bind("<Leave>", lambda e: self._set_hover(False))
+        self.bind("<ButtonRelease-1>", self._click)
+        self._draw()
+
+    def _round_rect(self, x0, y0, x1, y1, r, **kw):
+        pts = [x0 + r, y0, x1 - r, y0, x1, y0, x1, y0 + r, x1, y1 - r, x1, y1, x1 - r, y1, x0 + r, y1,
+               x0, y1, x0, y1 - r, x0, y0 + r, x0, y0]
+        return self.create_polygon(pts, smooth=True, **kw)
+
+    def _draw(self):
+        self.delete("all")
+        base, hover, fg = self.COLOURS[self.kind]
+        fill = THEME["disabled"] if not self.enabled else THEME[hover if self.hover else base]
+        self._round_rect(1, 1, self._bw - 1, self._bh - 1, self._bh // 2, fill=fill, outline=fill)
+        self.create_text(self._bw / 2, self._bh / 2, text=self.text, fill=fg, font=self._font)
+
+    def _set_hover(self, on):
+        self.hover = on
+        self._draw()
+
+    def _click(self, event):
+        if self.enabled and 0 <= event.x <= self._bw and 0 <= event.y <= self._bh:
+            self.command()
+
+    def set_text(self, text):
+        self.text = text
+        self._draw()
+
+    def set_enabled(self, on):
+        self.enabled = bool(on)
+        self.config(cursor="hand2" if on else "")
+        self._draw()
+
+
+def card(parent, number, title):
+    """A white card with a numbered title; returns (card, body)."""
+    t = THEME
+    outer = tk.Frame(parent, bg=t["card"], highlightthickness=1, highlightbackground=t["border"])
+    head = tk.Frame(outer, bg=t["card"])
+    head.pack(fill="x", padx=14, pady=(12, 4))
+    badge = tk.Canvas(head, width=24, height=24, bg=t["card"], highlightthickness=0)
+    badge.create_oval(1, 1, 23, 23, fill=t["blue"], outline=t["blue"])
+    badge.create_text(12, 12, text=str(number), fill="#ffffff", font=(ui_family(), 10, "bold"))
+    badge.pack(side="left")
+    tk.Label(head, text=title, bg=t["card"], fg=t["purple2"], font=(ui_family(), 12, "bold")).pack(side="left", padx=8)
+    body = ttk.Frame(outer, style="Card.TFrame")
+    body.pack(fill="both", expand=True, padx=14, pady=(2, 12))
+    return outer, body, head
+
+
+def header(parent, on_support):
+    """The app's bar: dark purple fading to blue, with the name and a support link."""
+    t, fam = THEME, ui_family()
+    c = tk.Canvas(parent, height=64, highlightthickness=0, bd=0, bg=t["purple"])
+
+    def draw(event=None):
+        c.delete("all")
+        w = max(c.winfo_width(), 400)
+        a, b = (0x2b, 0x16, 0x55), (0x2f, 0x5c, 0xd6)
+        steps = 64
+        for i in range(steps):
+            k = (i / (steps - 1)) ** 2.2  # mostly purple, turning blue on the right
+            col = "#%02x%02x%02x" % tuple(round(a[j] + (b[j] - a[j]) * k) for j in range(3))
+            c.create_rectangle(i * w / steps, 0, (i + 1) * w / steps + 1, 64, fill=col, outline=col)
+        # The logo: a white speech bubble with "CC".
+        c.create_polygon(18, 14, 52, 14, 56, 18, 56, 40, 52, 44, 30, 44, 22, 51, 24, 44, 18, 44, 14, 40, 14, 18,
+                         smooth=True, fill="#ffffff", outline="#ffffff")
+        c.create_text(35, 29, text="CC", fill=t["purple2"], font=(fam, 12, "bold"))
+        c.create_text(70, 22, text="Subtitle Generator", anchor="w", fill="#ffffff", font=(fam, 16, "bold"))
+        c.create_text(71, 44, text="AI subtitles on your own computer · free, private, no limits", anchor="w",
+                      fill="#cfc6ff", font=(fam, 9))
+        link = c.create_text(w - 18, 32, text="♥ Support this project", anchor="e", fill="#ffffff",
+                             font=(fam, 10, "underline"), tags="support")
+        c.tag_bind("support", "<Button-1>", lambda e: on_support())
+        c.tag_bind("support", "<Enter>", lambda e: c.config(cursor="hand2"))
+        c.tag_bind("support", "<Leave>", lambda e: c.config(cursor=""))
+        return link
+    c.bind("<Configure>", draw)
+    return c
+
+
+# --------------------------------------------------------------------------- #
+#  The player: the video with its captions, and its sound, in step
+# --------------------------------------------------------------------------- #
+PLAY_RATE = 24000  # the player's sound: mono, 16-bit
+
+
+class Player:
+    """Plays the video's picture (small frames from FFmpeg, with the captions drawn by
+    libass, exactly as they'll be burned in) and its sound (sounddevice), keeping the
+    picture on the sound's clock. Thread-safe enough for one UI thread calling it."""
+    FPS = 30
+
+    def __init__(self, ffmpeg):
+        self.ffmpeg = ffmpeg
+        self.path = self.info = None
+        self.audio = None  # int16 samples at PLAY_RATE, once read
+        self.t = 0.0  # the playhead while paused
+        self.playing = False
+        self.stop_at = None  # pause here (playing one caption)
+        self.size = (2, 2)
+        self._gen = 0  # frames from an older pipe are dropped
+        self._proc = self._dir = None
+        self._frames = queue.Queue(maxsize=12)
+        self._pending = []
+        self._stream = None
+        self._pos = 0  # sound samples handed out
+        self._latency = 0.0
+        self._mark = None  # (sample, sound card time it's heard at), from the last block
+        self._t0 = self._wall0 = 0.0
+        self._subs = None  # () -> subs folder or None: the captions to draw
+
+    # ---- setting up
+    def load(self, path, info, size, subs):
         self.stop()
-        if sys.platform == "win32":
-            import winsound
-            winsound.PlaySound(path, winsound.SND_FILENAME | winsound.SND_ASYNC)
+        self.path, self.info, self.size, self._subs = path, info, size, subs
+        self.audio, self.t = None, 0.0
+        threading.Thread(target=self._read_sound, args=(path,), daemon=True).start()
+
+    def _read_sound(self, path):
+        try:
+            r = subprocess.run([self.ffmpeg, "-nostdin", "-v", "error", "-i", path, "-vn", "-ac", "1", "-ar",
+                                str(PLAY_RATE), "-f", "s16le", "pipe:1"], capture_output=True, **_POPEN_FLAGS)
+            if path == self.path:
+                self.audio = np.frombuffer(r.stdout[:len(r.stdout) // 2 * 2], np.int16)
+        except Exception as e:
+            log_error(f"Player sound: {type(e).__name__}: {e}")
+
+    @property
+    def duration(self):
+        return (self.info or {}).get("duration") or 0.0
+
+    # ---- the clock
+    def clock(self):
+        if not self.playing:
+            return self.t
+        if self._stream is not None:
+            mark = self._mark
+            if mark is not None:
+                try:  # the sample being heard: the last block's first sample plus the time since it began
+                    idx, dac = mark
+                    return self._t0 + max(0.0, idx / PLAY_RATE + (self._stream.time - dac))
+                except Exception:
+                    pass
+            return self._t0 + max(0.0, self._pos / PLAY_RATE - self._latency)
+        return self._t0 + (time.monotonic() - self._wall0)
+
+    # ---- controls
+    def play(self, stop_at=None):
+        if not self.path:
             return
-        for player in (["afplay"] if sys.platform == "darwin" else ["paplay", "aplay", "ffplay"]):
-            exe = shutil.which(player)
-            if exe:
-                args = [exe, "-nodisp", "-autoexit", path] if player == "ffplay" else [exe, path]
-                self.proc = subprocess.Popen(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                return
+        if self.t >= self.duration - 0.05:
+            self.t = 0.0
+        self.stop_at = stop_at
+        self._start(self.t)
+
+    def pause(self):
+        if self.playing:
+            self.t = min(self.clock(), self.duration)
+        self.playing = False
+        self.stop_at = None
+        self._stop_sound()
+        self._stop_video()
+
+    def seek(self, t):
+        t = max(0.0, min(t, self.duration))
+        if self.playing:
+            self._start(t)
+        else:
+            self.t = t
+
+    def refresh(self):
+        """The captions changed: draw the new ones from here on."""
+        if self.playing:
+            self._start_video(self.clock())
 
     def stop(self):
-        if sys.platform == "win32":
+        self.pause()
+        self.path = None
+
+    def _start(self, t):
+        self._stop_sound()
+        self._t0, self._wall0, self.playing = t, time.monotonic(), True
+        self._start_video(t)
+        self._start_sound(t)
+
+    # ---- sound
+    def _start_sound(self, t):
+        self._pos, self._mark = 0, None
+        if self.audio is None:
+            return
+        try:
+            import sounddevice as sd
+        except Exception:
+            return  # no sound library: the picture plays on the computer's clock
+        start = int(t * PLAY_RATE)
+        audio = self.audio
+
+        def fill(out, frames, when, _status):
+            i = start + self._pos
+            chunk = audio[i:i + frames]
+            out[:len(chunk), 0] = chunk
+            out[len(chunk):, 0] = 0
+            if when is not None:
+                self._mark = (self._pos, when.outputBufferDacTime)  # this block is heard from then
+            self._pos += frames
+        try:
+            self._stream = sd.OutputStream(samplerate=PLAY_RATE, channels=1, dtype="int16", callback=fill,
+                                           latency="low")
+            self._latency = float(self._stream.latency or 0)
+            self._stream.start()
+        except Exception as e:  # no sound device: play the picture anyway
+            log_error(f"Player sound device: {type(e).__name__}: {e}")
+            self._stream = None
+            self._wall0 = time.monotonic()
+
+    def _stop_sound(self):
+        if self._stream is not None:
             try:
-                import winsound
-                winsound.PlaySound(None, winsound.SND_PURGE)
+                self._stream.stop()
+                self._stream.close()
             except Exception:
                 pass
-        if self.proc and self.proc.poll() is None:
-            self.proc.terminate()
-        self.proc = None
+        self._stream = None
+
+    # ---- picture
+    def _start_video(self, t):
+        self._stop_video()
+        self._gen += 1
+        gen = self._gen
+        w, h = self.size
+        vf = f"fps={self.FPS},scale={w}:{h},setpts=PTS+{t:.3f}/TB"
+        d = self._subs() if self._subs else None
+        if d:
+            vf += "," + SUB_FILTER
+        try:
+            self._proc = subprocess.Popen(
+                [self.ffmpeg, "-nostdin", "-v", "error", "-ss", f"{t:.3f}", "-i", self.path, "-an", "-sn", "-vf", vf,
+                 "-f", "rawvideo", "-pix_fmt", "rgb24", "pipe:1"], stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL, cwd=d, **_POPEN_FLAGS)
+        except OSError as e:
+            log_error(f"Player picture: {e}")
+            return
+        self._dir = d
+        proc = self._proc
+        threading.Thread(target=self._read_frames, args=(proc, gen, t, w * h * 3), daemon=True).start()
+
+    def _read_frames(self, proc, gen, t, size):
+        n = 0
+        while gen == self._gen:
+            data = proc.stdout.read(size)
+            if len(data) < size:
+                break
+            while gen == self._gen:
+                try:
+                    self._frames.put((gen, t + n / self.FPS, data), timeout=0.2)
+                    break
+                except queue.Full:
+                    continue
+            n += 1
+
+    def _stop_video(self):
+        self._gen += 1
+        if self._proc is not None:
+            try:
+                self._proc.kill()
+                self._proc.wait(timeout=2)
+            except Exception:
+                pass
+        self._proc = None
+        if self._dir:
+            shutil.rmtree(self._dir, ignore_errors=True)
+        self._dir = None
+        self._pending = []
+        while True:
+            try:
+                self._frames.get_nowait()
+            except queue.Empty:
+                break
+
+    def frame_for(self, t):
+        """The newest frame due by time t (bytes), or None if none is new."""
+        best = None
+        while True:
+            if not self._pending:
+                try:
+                    item = self._frames.get_nowait()
+                except queue.Empty:
+                    break
+                if item[0] != self._gen:
+                    continue
+                self._pending.append(item)
+            gen, ft, data = self._pending[0]
+            if ft > t + 0.5 / self.FPS:
+                break
+            best = data
+            self._pending.pop(0)
+        return best
+
+
+class Timeline(tk.Canvas):
+    """The captions as blocks along the video's time, with the playhead. Click to jump
+    there (or to pick a caption), drag to scrub."""
+    H = 64
+    WINDOW = 30.0  # seconds shown at once in a long video
+
+    def __init__(self, parent, on_seek, on_pick):
+        t = THEME
+        super().__init__(parent, height=self.H, bg=t["card"], highlightthickness=0, bd=0)
+        self.on_seek, self.on_pick = on_seek, on_pick
+        self.caps, self.duration, self.playhead, self.selected = [], 0.0, 0.0, None
+        self.view = (0.0, 1.0)
+        self._drag = False
+        self.bind("<Configure>", lambda e: self.draw())
+        self.bind("<ButtonPress-1>", self._press)
+        self.bind("<B1-Motion>", self._motion)
+        self.bind("<ButtonRelease-1>", self._release)
+
+    def set(self, caps=None, duration=None, playhead=None, selected=-1):
+        if caps is not None:
+            self.caps = caps
+        if duration is not None:
+            self.duration = duration
+        if playhead is not None:
+            self.playhead = playhead
+        if selected != -1:
+            self.selected = selected
+        self._follow()
+        self.draw()
+
+    def _follow(self):
+        d = self.duration
+        if self._drag:
+            return  # never scroll under the mouse
+        if d <= 60:
+            self.view = (0.0, max(d, 0.01))
+            return
+        a, b = self.view
+        if b - a != self.WINDOW or not (a + self.WINDOW * 0.1 <= self.playhead <= b - self.WINDOW * 0.15):
+            a = max(0.0, min(self.playhead - self.WINDOW * 0.25, d - self.WINDOW))
+            self.view = (a, a + self.WINDOW)
+
+    def _x(self, t):
+        a, b = self.view
+        w = max(self.winfo_width(), 50)
+        return 8 + (t - a) / (b - a) * (w - 16)
+
+    def _t(self, x):
+        a, b = self.view
+        w = max(self.winfo_width(), 50)
+        return a + (x - 8) / (w - 16) * (b - a)
+
+    def draw(self):
+        t = THEME
+        self.delete("all")
+        w = max(self.winfo_width(), 50)
+        if self.duration <= 0:
+            self.create_text(w / 2, self.H / 2, text="The timeline appears when a video is open.", fill=t["muted"],
+                             font=(ui_family(), 9))
+            return
+        fam = ui_family()
+        # Overview: the whole video, and the part shown.
+        self.create_rectangle(8, 2, w - 8, 6, fill="#ece8f7", outline="")
+        a, b = self.view
+        d = self.duration
+        self.create_rectangle(8 + a / d * (w - 16), 2, 8 + b / d * (w - 16), 6, fill=t["lavender_line"], outline="")
+        # Caption blocks.
+        self.create_rectangle(8, 14, w - 8, 44, fill="#f6f4fc", outline="")
+        for k, c in enumerate(self.caps):
+            if c["end"] < a or c["start"] > b:
+                continue
+            x0, x1 = self._x(c["start"]), max(self._x(c["end"]), self._x(c["start"]) + 2)
+            sel = k == self.selected
+            self.create_rectangle(x0, 16, x1, 42, fill=t["blue"] if sel else t["lavender"],
+                                  outline=t["blue_hover"] if sel else t["lavender_line"], tags=("cap", f"c{k}"))
+            if x1 - x0 > 30:
+                label = c["text"].replace("\n", " ")
+                room = int((x1 - x0 - 8) / 6)
+                if room > 2:
+                    self.create_text(x0 + 4, 29, text=label[:room] + ("…" if len(label) > room else ""),
+                                     anchor="w", fill="#ffffff" if sel else t["purple"], font=(fam, 8),
+                                     tags=("cap", f"c{k}"))
+        # Seconds along the bottom.
+        span = b - a
+        step = next(s for s in (1, 2, 5, 10, 15, 30, 60, 120, 300, 600, 1800) if span / s <= 12)
+        s0 = int(a // step + 1) * step
+        for s in range(int(s0), int(b) + 1, step):
+            x = self._x(s)
+            self.create_line(x, 46, x, 50, fill=t["disabled"])
+            self.create_text(x, 57, text=fmt_duration(s), fill=t["muted"], font=(fam, 8))
+        # The playhead.
+        x = self._x(self.playhead)
+        self.create_line(x, 10, x, 48, fill=t["purple"], width=2)
+        self.create_polygon(x - 5, 9, x + 5, 9, x, 15, fill=t["purple"], outline=t["purple"])
+
+    def _press(self, e):
+        if self.duration <= 0:
+            return
+        if e.y <= 8:  # the overview: jump anywhere
+            w = max(self.winfo_width(), 50)
+            self.on_seek(max(0.0, min(self.duration, (e.x - 8) / (w - 16) * self.duration)), done=True)
+            return
+        hit = [tag for item in self.find_overlapping(e.x, e.y, e.x, e.y) for tag in self.gettags(item)
+               if tag.startswith("c") and tag != "cap"]
+        if hit and 14 <= e.y <= 44:
+            self.on_pick(int(hit[-1][1:]))
+            return
+        self._drag = True
+        self.on_seek(max(0.0, min(self.duration, self._t(e.x))), done=False)
+
+    def _motion(self, e):
+        if self._drag:
+            self.on_seek(max(0.0, min(self.duration, self._t(e.x))), done=False)
+
+    def _release(self, e):
+        if self._drag:
+            t = max(0.0, min(self.duration, self._t(e.x)))  # in the view the press was made in
+            self._drag = False
+            self.on_seek(t, done=True)
 
 
 # --------------------------------------------------------------------------- #
 #  GUI
 # --------------------------------------------------------------------------- #
 class SubtitleApp:
-    PREVIEW_W, PREVIEW_H = 384, 216
+    VIDEO_W, VIDEO_H = 448, 252  # the player's picture
 
     def __init__(self, root):
         self.root = root
         root.title("Subtitle Generator")
         self.missing = load_libraries()
+        self.family = apply_theme(root)
         self.ffmpeg = find_ffmpeg() if "imageio-ffmpeg" not in self.missing else None
         self.ui_queue = queue.Queue()
         self.cancelled = False
@@ -752,14 +1412,16 @@ class SubtitleApp:
         self.video = None  # dict(path, info)
         self.caps = []
         self.editing = None  # index of the caption in the editor
+        self.now_row = None  # the caption the player is on
         self.lang = None  # the language spoken (detected or chosen)
         self.dirty = False
         self.models = {}  # (model label, device) -> loaded WhisperModel
-        self.player = SoundPlayer()
-        self.tmp = tempfile.mkdtemp(prefix="subgen-ui-")
+        self.player = Player(self.ffmpeg) if self.ffmpeg else None
         self.preview_req = None
         self.preview_cv = threading.Condition()
-        self.preview_photo = None
+        self.video_photo = None
+        self._setting_preset = False
+        self._refresh_job = None
         self.has_gpu = gpu_present() if not self.missing else False
         self._pump_ui()
         threading.Thread(target=self._preview_worker, daemon=True).start()
@@ -769,6 +1431,7 @@ class SubtitleApp:
         home = os.path.expanduser("~")
         videos = next((p for p in (os.path.join(home, "Videos"), os.path.join(home, "Movies")) if os.path.isdir(p)), home)
         fonts = available_fonts()
+        clean = PRESETS["Clean"]
         self.v = {
             "model": tk.StringVar(value="Accurate — Whisper large-v3 turbo" if self.has_gpu else "Fast — Whisper small"),
             "language": tk.StringVar(value="Detect automatically"),
@@ -776,10 +1439,12 @@ class SubtitleApp:
             "mode": tk.StringVar(value=list(CAPTION_MODES)[0]),
             "srt": tk.BooleanVar(value=True), "vtt": tk.BooleanVar(value=False),
             "track": tk.BooleanVar(value=False), "burn": tk.BooleanVar(value=False),
-            "font": tk.StringVar(value="Arial" if "Arial" in fonts else fonts[0]),
-            "size": tk.StringVar(value="Medium"), "bold": tk.BooleanVar(value=True),
-            "colour": tk.StringVar(value="#ffffff"), "look": tk.StringVar(value=LOOKS[0]),
-            "position": tk.StringVar(value="Bottom"),
+            "preset": tk.StringVar(value="Clean"),
+            "font": tk.StringVar(value=clean["font"] if clean["font"] in fonts else fonts[0]),
+            "size": tk.StringVar(value=clean["size"]), "bold": tk.BooleanVar(value=clean["bold"]),
+            "colour": tk.StringVar(value=clean["colour"]), "look": tk.StringVar(value=clean["look"]),
+            "position": tk.StringVar(value=clean["position"]), "animation": tk.StringVar(value=clean["animation"]),
+            "highlight": tk.StringVar(value=clean["highlight"]),
             "where": tk.StringVar(value="same"), "out_dir": tk.StringVar(value=videos),
             "reveal": tk.BooleanVar(value=True),
         }
@@ -787,9 +1452,11 @@ class SubtitleApp:
         self._build_ui()
         self.v["model"].trace_add("write", lambda *_: self._on_model())
         self.v["where"].trace_add("write", lambda *_: self._on_where())
-        self.v["colour"].trace_add("write", lambda *_: self.swatch.config(bg=self.v["colour"].get()))
-        for k in ("font", "size", "bold", "colour", "look", "position"):
-            self.v[k].trace_add("write", lambda *_: self._request_preview())
+        self.v["preset"].trace_add("write", lambda *_: self._on_preset())
+        for k in ("colour", "highlight"):
+            self.v[k].trace_add("write", lambda *_, k=k: self.swatches[k].config(bg=self.v[k].get()))
+        for k in ("font", "size", "bold", "colour", "look", "position", "animation", "highlight"):
+            self.v[k].trace_add("write", lambda *_: self._on_style())
         for k in ("srt", "vtt", "track", "burn"):
             self.v[k].trace_add("write", lambda *_: self._on_outputs())
         self._on_model()
@@ -799,6 +1466,11 @@ class SubtitleApp:
         self.dnd = enable_drag_and_drop(root, self._on_drop)
         self.drop_lbl.config(text="Drag a video or audio file here, or click Choose." if self.dnd
                              else "Click Choose to pick a video or audio file.")
+        for seq, fn in (("<space>", lambda: self.toggle_play()), ("<Left>", lambda: self.skip(-2)),
+                        ("<Right>", lambda: self.skip(2)), ("<bracketleft>", lambda: self.set_edge("start")),
+                        ("<bracketright>", lambda: self.set_edge("end"))):
+            root.bind(seq, lambda e, fn=fn: None if isinstance(e.widget, (tk.Entry, ttk.Entry, tk.Text,
+                                                                          ttk.Combobox)) else fn())
         if self._required_missing():
             self.status.config(text="Some components are missing.")
             root.after(200, self.offer_install)
@@ -809,8 +1481,675 @@ class SubtitleApp:
                 "(with H.264 and subtitle drawing) is installed. Try reinstalling: "
                 f'"{sys.executable}" -m pip install --force-reinstall imageio-ffmpeg'))
 
+    # ---- layout --------------------------------------------------------- #
+    def _build_ui(self):
+        t, fam = THEME, self.family
+        import webbrowser
+        header(self.root, lambda: webbrowser.open(SUPPORT_URL)).pack(fill="x")
+        main = tk.Frame(self.root, bg=t["bg"])
+        main.pack(fill="both", expand=True, padx=14, pady=(12, 6))
+        main.columnconfigure(0, weight=2)
+        main.columnconfigure(1, weight=3)
+        main.rowconfigure(1, weight=1)
+        gap = 6
+
+        # 1. Video
+        c1, f, _ = card(main, 1, "Video or audio")
+        c1.grid(row=0, column=0, sticky="nsew", padx=(0, gap), pady=(0, gap * 2))
+        f.columnconfigure(1, weight=1)
+        self.choose_btn = ttk.Button(f, text="Choose…", command=self.pick_video)
+        self.choose_btn.grid(row=0, column=0, sticky="w")
+        self.open_subs_btn = ttk.Button(f, text="Open subtitle file…", command=self.open_subtitles)
+        self.open_subs_btn.grid(row=0, column=1, sticky="w", padx=8)
+        self.file_lbl = ttk.Label(f, text="No video yet", style="File.Card.TLabel")
+        self.file_lbl.grid(row=1, column=0, columnspan=2, sticky="w", pady=(10, 0))
+        self.drop_lbl = ttk.Label(f, text="", style="Muted.Card.TLabel", wraplength=380)
+        self.drop_lbl.grid(row=2, column=0, columnspan=2, sticky="w", pady=(2, 0))
+
+        # 2. Recognition
+        c2, f, _ = card(main, 2, "Write the subtitles")
+        c2.grid(row=0, column=1, sticky="nsew", padx=(gap, 0), pady=(0, gap * 2))
+        f.columnconfigure(4, weight=1)
+        rows = (("Model", "model", list(MODELS), 33, 0, 0), ("Language", "language", list(LANGUAGES), 20, 0, 2),
+                ("Run on", "device", [CPU_DEVICE] + ([GPU_DEVICE] if self.has_gpu else []), 33, 1, 0),
+                ("Captions", "mode", list(CAPTION_MODES), 40, 1, 2))
+        for label, key, values, width, row, col in rows:
+            ttk.Label(f, text=label, style="Card.TLabel").grid(row=row, column=col, sticky="w", padx=(0 if col == 0 else 14, 6), pady=3)
+            cb = ttk.Combobox(f, values=values, textvariable=self.v[key], state="readonly", width=width, height=20)
+            cb.grid(row=row, column=col + 1, sticky="w", pady=3)
+            if key == "device":
+                self.device_cb = cb
+        self.go_btn = PillButton(f, "Make subtitles", self.transcribe)
+        self.go_btn.grid(row=0, column=5, rowspan=2, sticky="e", padx=(12, 0))
+        self.model_lbl = ttk.Label(f, text="", style="Muted.Card.TLabel", wraplength=760)
+        self.model_lbl.grid(row=2, column=0, columnspan=6, sticky="w", pady=(6, 0))
+
+        # 3. Check and fix: the list, the player, the editor, the timeline
+        c3, f, _ = card(main, 3, "Check and fix")
+        c3.grid(row=1, column=0, columnspan=2, sticky="nsew", pady=(0, gap * 2))
+        f.columnconfigure(0, weight=1)
+        f.rowconfigure(0, weight=1)
+        listf = ttk.Frame(f, style="Card.TFrame")
+        listf.grid(row=0, column=0, sticky="nsew")
+        listf.columnconfigure(0, weight=1)
+        listf.rowconfigure(0, weight=1)
+        self.tree = ttk.Treeview(listf, columns=("start", "end", "text"), show="headings", selectmode="browse")
+        for col, text, width, anchor, stretch in (("start", "Start", 78, "e", False), ("end", "End", 78, "e", False),
+                                                  ("text", "Caption", 360, "w", True)):
+            self.tree.heading(col, text=text, anchor="w" if col == "text" else "e")
+            self.tree.column(col, width=width, anchor=anchor, stretch=stretch)
+        self.tree.tag_configure("now", background=t["now"])
+        self.tree.grid(row=0, column=0, sticky="nsew")
+        sb = ttk.Scrollbar(listf, orient="vertical", command=self.tree.yview)
+        sb.grid(row=0, column=1, sticky="ns")
+        self.tree.configure(yscrollcommand=sb.set)
+        self.tree.bind("<<TreeviewSelect>>", lambda e: self._on_select())
+        self.tree.bind("<Double-1>", lambda e: self.play_line())
+        self.list_lbl = ttk.Label(listf, text="", style="Muted.Card.TLabel")
+        self.list_lbl.grid(row=1, column=0, columnspan=2, sticky="w", pady=(6, 0))
+
+        side = ttk.Frame(f, style="Card.TFrame")
+        side.grid(row=0, column=1, sticky="nsew", padx=(16, 0))
+        box = tk.Frame(side, bg=t["video"], width=self.VIDEO_W, height=self.VIDEO_H)
+        box.grid(row=0, column=0, sticky="n")
+        box.pack_propagate(False)
+        self.screen = tk.Label(box, bg=t["video"], bd=0, fg="#a99fd0", text="Open a video to see it here",
+                               font=(fam, 10))
+        self.screen.pack(fill="both", expand=True)
+        bar = ttk.Frame(side, style="Card.TFrame")
+        bar.grid(row=1, column=0, sticky="ew", pady=(8, 0))
+        self.play_btn = PillButton(bar, "▶  Play", self.toggle_play, kind="dark", height=32, padx=16,
+                                   font=(fam, 10, "bold"))
+        self.play_btn.pack(side="left")
+        self.transport = []
+        for text, cmd, tip in (("⟲ 2 s", lambda: self.skip(-2), "Back 2 seconds (Left arrow)"),
+                               ("2 s ⟳", lambda: self.skip(2), "Forward 2 seconds (Right arrow)")):
+            b = ttk.Button(bar, text=text, command=cmd, width=6)
+            b.pack(side="left", padx=(6, 0))
+            self.transport.append(b)
+        self.time_lbl = ttk.Label(bar, text="0:00.0 / 0:00.0", style="Muted.Card.TLabel", width=17, anchor="e")
+        self.time_lbl.pack(side="right")
+
+        ed = ttk.Frame(side, style="Card.TFrame")
+        ed.grid(row=2, column=0, sticky="ew", pady=(10, 0))
+        ed.columnconfigure(5, weight=1)
+        ttk.Label(ed, text="From", style="Card.TLabel").grid(row=0, column=0, sticky="w")
+        self.start_e = ttk.Entry(ed, width=12)
+        self.start_e.grid(row=0, column=1, sticky="w", padx=(6, 4))
+        ttk.Label(ed, text="to", style="Card.TLabel").grid(row=0, column=2, sticky="w", padx=(4, 0))
+        self.end_e = ttk.Entry(ed, width=12)
+        self.end_e.grid(row=0, column=3, sticky="w", padx=6)
+        for e in (self.start_e, self.end_e):
+            e.bind("<Return>", lambda ev: self._apply_times())
+            e.bind("<FocusOut>", lambda ev: self._apply_times())
+        times = ttk.Frame(ed, style="Card.TFrame")
+        times.grid(row=0, column=5, sticky="e")
+        self.edge_btns = []
+        for text, cmd in (("Start here [", lambda: self.set_edge("start")), ("End here ]", lambda: self.set_edge("end")),
+                          ("− 0.1 s", lambda: self.nudge(-0.1)), ("+ 0.1 s", lambda: self.nudge(0.1))):
+            b = ttk.Button(times, text=text, command=cmd)
+            b.pack(side="left", padx=(4, 0))
+            self.edge_btns.append(b)
+        self.text_w = tk.Text(ed, height=3, width=46, wrap="word", font=(fam, 12), undo=True, relief="flat",
+                              highlightthickness=1, highlightbackground=t["border"], highlightcolor=t["blue"],
+                              bg="#ffffff", fg=t["text"], insertbackground=t["blue"], padx=8, pady=6,
+                              selectbackground=t["blue_soft"], selectforeground=t["text"])
+        self.text_w.grid(row=1, column=0, columnspan=6, sticky="ew", pady=(8, 6))
+        self.text_w.bind("<KeyRelease>", lambda e: self._apply_text())
+        btns = ttk.Frame(ed, style="Card.TFrame")
+        btns.grid(row=2, column=0, columnspan=6, sticky="ew")
+        self.edit_btns = []
+        for text, cmd in (("Split at cursor", self.split_line), ("Join with next", self.merge_next),
+                          ("Delete", self.delete_line)):
+            b = ttk.Button(btns, text=text, command=cmd)
+            b.pack(side="left", padx=(0, 6))
+            self.edit_btns.append(b)
+        self.edit_hint = ttk.Label(btns, text="Space plays and pauses. Double-click a caption to hear it.",
+                                   style="Muted.Card.TLabel")
+        self.edit_hint.pack(side="right")
+        self.timeline = Timeline(f, self._on_timeline_seek, self._on_timeline_pick)
+        self.timeline.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(12, 0))
+
+        # 4. Save
+        c4, f, _ = card(main, 4, "Save")
+        c4.grid(row=2, column=0, columnspan=2, sticky="ew")
+        f.columnconfigure(0, weight=1)
+        outs = ttk.Frame(f, style="Card.TFrame")
+        outs.grid(row=0, column=0, sticky="w")
+        for key, text in (("srt", "Subtitle file (.srt)"), ("vtt", "Web subtitle file (.vtt)"),
+                          ("track", "Video with subtitles you can switch on"),
+                          ("burn", "Video with captions burned in")):
+            self.__dict__[f"{key}_cb"] = ttk.Checkbutton(outs, text=text, variable=self.v[key], style="Card.TCheckbutton")
+            self.__dict__[f"{key}_cb"].pack(side="left", padx=(0, 20))
+        look = self.look_frame = ttk.Frame(f, style="Card.TFrame")
+        look.grid(row=1, column=0, sticky="w", pady=(10, 0))
+        self.swatches = {}
+        row1 = (("Look", "preset", list(PRESETS) + ["Custom"], 10), ("Animation", "animation", ANIMATIONS, 19))
+        row2 = (("Font", "font", self.fonts, 12), ("Size", "size", list(SIZES), 10), ("Style", "look", LOOKS, 18),
+                ("Position", "position", list(POSITIONS), 8))
+        for r, items in enumerate((row1, row2)):
+            line = ttk.Frame(look, style="Card.TFrame")
+            line.grid(row=r, column=0, sticky="w", pady=2)
+            if r == 0:
+                ttk.Label(line, text="Burned-in captions", style="Card.TLabel",
+                          font=(fam, 10, "bold")).pack(side="left", padx=(0, 10))
+            for label, key, values, width in items:
+                ttk.Label(line, text=label, style="Card.TLabel").pack(side="left", padx=(8, 4))
+                ttk.Combobox(line, values=values, textvariable=self.v[key], state="readonly",
+                             width=width).pack(side="left")
+            if r == 0:
+                self._swatch(line, "Word colour", "highlight")
+                self.anim_note = ttk.Label(line, text="", style="Muted.Card.TLabel")
+                self.anim_note.pack(side="left", padx=(12, 0))
+            else:
+                ttk.Checkbutton(line, text="Bold", variable=self.v["bold"], style="Card.TCheckbutton").pack(
+                    side="left", padx=(12, 0))
+                self._swatch(line, "Colour", "colour")
+        where = ttk.Frame(f, style="Card.TFrame")
+        where.grid(row=2, column=0, sticky="ew", pady=(12, 0))
+        where.columnconfigure(2, weight=1)
+        ttk.Radiobutton(where, text="Next to the video", value="same", variable=self.v["where"],
+                        style="Card.TRadiobutton").grid(row=0, column=0, sticky="w")
+        ttk.Radiobutton(where, text="In this folder:", value="folder", variable=self.v["where"],
+                        style="Card.TRadiobutton").grid(row=0, column=1, sticky="w", padx=(14, 6))
+        self.dir_e = ttk.Entry(where, textvariable=self.v["out_dir"])
+        self.dir_e.grid(row=0, column=2, sticky="ew")
+        self.dir_btn = ttk.Button(where, text="Choose…", command=self.pick_folder)
+        self.dir_btn.grid(row=0, column=3, padx=8)
+        self.save_btn = PillButton(where, "Save", self.save, padx=30)
+        self.save_btn.grid(row=0, column=4, padx=(6, 0))
+
+        foot = tk.Frame(self.root, bg=t["bg"])
+        foot.pack(fill="x", padx=14, pady=(0, 10))
+        foot.columnconfigure(1, weight=1)
+        self.status = ttk.Label(foot, text="Ready.", style="Status.TLabel", wraplength=780)
+        self.status.grid(row=0, column=0, sticky="w")
+        self.progress = ttk.Progressbar(foot, mode="determinate", maximum=1000, length=240)
+        self.progress.grid(row=0, column=2, sticky="e", padx=(12, 8))
+        self.cancel_btn = ttk.Button(foot, text="Cancel", command=self.cancel, state="disabled")
+        self.cancel_btn.grid(row=0, column=3, sticky="e")
+
+    def _swatch(self, parent, label, key):
+        ttk.Label(parent, text=label, style="Card.TLabel").pack(side="left", padx=(12, 4))
+        sw = tk.Label(parent, width=3, relief="flat", bd=0, bg=self.v[key].get(), cursor="hand2",
+                      highlightthickness=1, highlightbackground=THEME["border"])
+        sw.pack(side="left", ipady=3)
+        sw.bind("<Button-1>", lambda e: self.pick_colour(key))
+        self.swatches[key] = sw
+
+    # ---- settings helpers ------------------------------------------------ #
+    def _on_outputs(self):
+        burn = self.v["burn"].get()
+
+        def walk(w):
+            for child in w.winfo_children():
+                yield child
+                yield from walk(child)
+        for w in walk(self.look_frame):
+            try:
+                if isinstance(w, ttk.Combobox):
+                    w.config(state="readonly" if burn else "disabled")
+                elif isinstance(w, (ttk.Checkbutton, ttk.Label)):
+                    w.config(state="normal" if burn else "disabled")
+            except tk.TclError:
+                pass
+        self._note_animation()
+        self._captions_changed()
+
+    def _note_animation(self):
+        anim = self.v["animation"].get() != "None"
+        text = ""
+        if anim and self.v["burn"].get() and (self.v["srt"].get() or self.v["vtt"].get() or self.v["track"].get()):
+            text = "Animation is for the burned-in video: subtitle files show plain text."
+        self.anim_note.config(text=text)
+
+    def _on_preset(self):
+        name = self.v["preset"].get()
+        if name not in PRESETS or self._setting_preset:
+            return
+        self._setting_preset = True
+        try:
+            for k, val in PRESETS[name].items():
+                if k == "font" and val not in self.fonts:
+                    val = self.fonts[0]
+                self.v[k].set(val)
+        finally:
+            self._setting_preset = False
+        self._on_style()
+
+    def _on_style(self):
+        if not self._setting_preset:
+            current = self._style()
+            match = next((n for n, p in PRESETS.items() if all(current[k] == p[k] for k in p)), "Custom")
+            if self.v["preset"].get() != match:
+                self._setting_preset = True  # just the name: the settings are already these
+                try:
+                    self.v["preset"].set(match)
+                finally:
+                    self._setting_preset = False
+        self._note_animation()
+        self._captions_changed()
+
+    def pick_colour(self, key="colour"):
+        if not self.v["burn"].get():
+            return
+        _, hexcode = colorchooser.askcolor(color=self.v[key].get(),
+                                           title="Caption colour" if key == "colour" else "Highlighted word colour")
+        if hexcode:
+            self.v[key].set(hexcode)
+
+    def _style(self):
+        return dict(font=self.v["font"].get(), size=self.v["size"].get(), bold=self.v["bold"].get(),
+                    colour=self.v["colour"].get(), look=self.v["look"].get(), position=self.v["position"].get(),
+                    animation=self.v["animation"].get(), highlight=self.v["highlight"].get())
+
+    def _shown_style(self):
+        """How the player draws the captions: as burned in, or plainly (like a player shows a subtitle file)."""
+        if self.v["burn"].get():
+            return self._style()
+        return dict(font=self.fonts[0], size="Medium", bold=False, colour="#ffffff", look="Box behind the text",
+                    position="Bottom", animation="None", highlight="#ffffff")
+
+    def _player_subs(self):
+        """A folder with the captions for the player to draw (called as it starts)."""
+        if not self.video or not self.video["info"]["width"] or not self.caps:
+            return None
+        info = self.video["info"]
+        return prepare_subs_dir([dict(c) for c in self.caps], info["width"], info["height"], self._shown_style())
+
+    def _captions_changed(self):
+        """The captions or their look changed: redraw the frame, and the player soon after."""
+        self._request_preview()
+        self.timeline.set(caps=self.caps)
+        if self.player is not None and self.player.playing:
+            if self._refresh_job:
+                self.root.after_cancel(self._refresh_job)
+            self._refresh_job = self.root.after(300, self.player.refresh)
+
+    # ---- choosing the video ------------------------------------------------ #
+    def _use_file(self, path):
+        if self.running or self._required_missing() or not self.ffmpeg:
+            if self._required_missing():
+                self.offer_install()
+            return
+        if not self._confirm_discard():
+            return
+        info = probe_media(self.ffmpeg, path)
+        if info["error"]:
+            messagebox.showwarning("Can't use this file", f"{os.path.basename(path)}: {info['error']}")
+            return
+        self.player.stop()
+        self.video = dict(path=path, info=info)
+        self.lang = None
+        kind = f"{info['width']}×{info['height']} video" if info["width"] else "audio"
+        self.file_lbl.config(text=os.path.basename(path))
+        self.drop_lbl.config(text=f"{kind}, {fmt_duration(info['duration'])}. Drop another file to switch.")
+        for key in ("track", "burn"):
+            self.__dict__[f"{key}_cb"].config(state="normal" if info["width"] else "disabled")
+            if not info["width"]:
+                self.v[key].set(False)
+        if info["width"]:
+            scale = min(self.VIDEO_W / info["width"], self.VIDEO_H / info["height"])
+            size = (max(2, int(info["width"] * scale) // 2 * 2), max(2, int(info["height"] * scale) // 2 * 2))
+        else:
+            size = (2, 2)
+        self.player.load(path, info, size, self._player_subs)
+        self.video_photo = None
+        self._set_caps([], dirty=False)
+        self.timeline.set(caps=[], duration=info["duration"], playhead=0.0, selected=None)
+        self._show_time()
+        if not info["width"]:
+            self.screen.config(image="", text="Audio only: no picture")
+        self.status.config(text="Click Make subtitles, or Open subtitle file to use ones you already have.")
+        self._update_buttons()
+
+    # ---- the caption list -------------------------------------------------- #
+    def _set_caps(self, caps, dirty=True, keep=None):
+        self.caps = caps
+        self.dirty = dirty
+        self.now_row = None
+        self.tree.delete(*self.tree.get_children())
+        for i, c in enumerate(caps):
+            self.tree.insert("", "end", iid=str(i), values=self._row(c))
+        if keep is not None and caps:
+            k = str(min(keep, len(caps) - 1))
+            self.tree.selection_set(k)
+            self.tree.see(k)
+        else:
+            self._load_editor(None)
+        self._update_list_label()
+        self._update_buttons()
+        self._captions_changed()
+
+    def _row(self, c):
+        return (fmt_short(c["start"]), fmt_short(c["end"]), c["text"].replace("\n", "  ⏎  "))
+
+    def _sel(self):
+        sel = self.tree.selection()
+        return int(sel[0]) if sel else None
+
+    def _on_select(self):
+        k = self._sel()
+        self._load_editor(k)
+        if k is not None and k < len(self.caps) and self.player is not None and not self.running:
+            c = self.caps[k]
+            t = self.player.clock()
+            if not (c["start"] <= t < c["end"]):  # jump to it, unless the player is already in it
+                self.player.seek(min(c["start"] + 0.12, c["end"]))  # just after a fade-in
+            self._show_time()
+        self.timeline.set(selected=k)
+
+    def _load_editor(self, k):
+        self.editing = k if k is not None and k < len(self.caps) else None
+        self.text_w.config(state="normal")  # a disabled widget ignores changes
+        for e in (self.start_e, self.end_e):
+            e.config(state="normal")
+            e.delete(0, "end")
+        self.text_w.delete("1.0", "end")
+        if self.editing is not None:
+            c = self.caps[self.editing]
+            self.start_e.insert(0, fmt_ts(c["start"], "."))
+            self.end_e.insert(0, fmt_ts(c["end"], "."))
+            self.text_w.insert("1.0", c["text"])
+            self.text_w.edit_reset()
+        self._update_buttons()
+        self._request_preview()
+
+    def _apply_text(self):
+        k = self.editing
+        if k is None or k >= len(self.caps) or self.running:
+            return
+        c = self.caps[k]
+        text = self.text_w.get("1.0", "end-1c").strip()
+        if text and text != c["text"]:
+            c["words"] = retime_words(caption_words(c), text, c["start"], c["end"])
+            c["text"] = text
+            self.tree.item(str(k), values=self._row(c))
+            self.dirty = True
+            self._update_list_label()
+            self._captions_changed()
+
+    def _change_times(self, k, start, end):
+        """Give caption k new times (its words follow), keeping the list in time order."""
+        c = self.caps[k]
+        c["words"] = fit_words(caption_words(c), c["start"], c["end"], start, end)
+        c["start"], c["end"] = start, end
+        order = sorted(range(len(self.caps)), key=lambda i: self.caps[i]["start"])
+        self._set_caps([self.caps[i] for i in order], keep=order.index(k))
+
+    def _apply_times(self):
+        k = self.editing
+        if k is None or k >= len(self.caps) or self.running:
+            return
+        c = self.caps[k]
+        try:
+            start, end = parse_ts(self.start_e.get()), parse_ts(self.end_e.get())
+            if end <= start:
+                raise ValueError
+        except ValueError:
+            self.status.config(text="Times look like 00:01:02.500 (hours:minutes:seconds), and the end must be "
+                                    "after the start.")
+            return
+        if abs(start - c["start"]) < 0.0005 and abs(end - c["end"]) < 0.0005:
+            return
+        self._change_times(k, start, end)
+
+    def set_edge(self, which):
+        """The selected caption starts (or ends) where the player is."""
+        k = self.editing
+        if k is None or self.running or self.player is None:
+            return
+        c, t = self.caps[k], round(self.player.clock(), 3)
+        start, end = (t, c["end"]) if which == "start" else (c["start"], t)
+        if end - start < 0.1:
+            self.status.config(text="A caption has to end after it starts: move the player first.")
+            return
+        self._change_times(k, start, end)
+        self.status.config(text=f"Caption {k + 1} now {'starts' if which == 'start' else 'ends'} at {fmt_short(t)}.")
+
+    def nudge(self, secs):
+        k = self.editing
+        if k is None or self.running:
+            return
+        c = self.caps[k]
+        if c["start"] + secs < 0:
+            return
+        self._change_times(k, c["start"] + secs, c["end"] + secs)
+
+    def split_line(self):
+        k = self.editing
+        if k is None or self.running:
+            return
+        c = self.caps[k]
+        text = self.text_w.get("1.0", "end-1c")
+        pos = len(self.text_w.get("1.0", "insert"))
+        a, b = text[:pos].strip(), text[pos:].strip()
+        if not a or not b:
+            self.status.config(text="Put the text cursor where the caption should be split.")
+            return
+        words = retime_words(caption_words(c), (a + " " + b), c["start"], c["end"])
+        n = len(_tokens(a))
+        mid = words[n][0] if n < len(words) else c["start"] + (c["end"] - c["start"]) * len(a) / (len(a) + len(b))
+        m = CAPTION_MODES[self.v["mode"].get()]
+        first = dict(start=c["start"], end=mid, text=break_lines(a.replace("\n", " "), m["line"], m["lines"]),
+                     words=words[:n])
+        second = dict(start=mid, end=c["end"], text=break_lines(b.replace("\n", " "), m["line"], m["lines"]),
+                      words=words[n:])
+        self._set_caps(self.caps[:k] + [first, second] + self.caps[k + 1:], keep=k)
+
+    def merge_next(self):
+        k = self.editing
+        if k is None or k + 1 >= len(self.caps) or self.running:
+            return
+        a, b = self.caps[k], self.caps[k + 1]
+        m = CAPTION_MODES[self.v["mode"].get()]
+        text = (a["text"] + " " + b["text"]).replace("\n", " ")
+        merged = dict(start=a["start"], end=max(a["end"], b["end"]), text=break_lines(text, m["line"], 2),
+                      words=caption_words(a) + caption_words(b))
+        self._set_caps(self.caps[:k] + [merged] + self.caps[k + 2:], keep=k)
+
+    def delete_line(self):
+        k = self.editing
+        if k is None or self.running:
+            return
+        self._set_caps(self.caps[:k] + self.caps[k + 1:], keep=k if k < len(self.caps) - 1 else k - 1)
+
+    # ---- the player ----------------------------------------------------------- #
+    def play_line(self):
+        """Play the selected caption, then pause at its end."""
+        k = self._sel()
+        if k is None or not self.video or self.running:
+            return
+        c = self.caps[k]
+        self.player.pause()
+        self.player.seek(max(0.0, c["start"] - 0.15))
+        self.player.play(stop_at=c["end"] + 0.1)
+        self._started()
+
+    def toggle_play(self):
+        if self.player is None or not self.video or self.running:
+            return
+        if self.player.playing:
+            self.player.pause()
+            self._stopped()
+        else:
+            self.player.play()
+            self._started()
+
+    def skip(self, secs):
+        if self.player is None or not self.video or self.running:
+            return
+        self.player.seek(self.player.clock() + secs)
+        self._show_time()
+        if not self.player.playing:
+            self._request_preview()
+
+    def _started(self):
+        self.play_btn.set_text("❚❚  Pause")
+        self._tick()
+
+    def _stopped(self):
+        self.play_btn.set_text("▶  Play")
+        self._show_time()
+        self._request_preview()
+
+    def _tick(self):
+        p = self.player
+        if p is None or not p.playing:
+            return
+        t = p.clock()
+        if (p.stop_at is not None and t >= p.stop_at) or t >= p.duration:
+            p.pause()
+            self._stopped()
+            return
+        data = p.frame_for(t)
+        if data is not None:
+            w, h = p.size
+            im = Image.frombuffer("RGB", (w, h), data, "raw", "RGB", 0, 1)
+            if self.video_photo is None or self.video_photo.width() != w or self.video_photo.height() != h:
+                self.video_photo = ImageTk.PhotoImage(im)
+                self.screen.config(image=self.video_photo, text="")
+            else:
+                self.video_photo.paste(im)
+        self._show_time(t)
+        self.root.after(12, self._tick)
+
+    def _show_time(self, t=None):
+        if self.player is None:
+            return
+        t = self.player.clock() if t is None else t
+        self.time_lbl.config(text=f"{fmt_short(t)} / {fmt_short(self.player.duration)}")
+        self.timeline.set(playhead=t)
+        k = next((i for i, c in enumerate(self.caps) if c["start"] <= t < c["end"]), None)
+        if k != self.now_row:
+            for row in (self.now_row, k):
+                if row is not None and self.tree.exists(str(row)):
+                    self.tree.item(str(row), tags=("now",) if row == k else ())
+            self.now_row = k
+            if k is not None and self.player.playing:
+                self.tree.see(str(k))
+
+    def _on_timeline_seek(self, t, done):
+        if self.player is None or self.running:
+            return
+        was = self.player.playing
+        if not done:  # scrubbing: show where, play from there when let go
+            if was:
+                self.player.pause()
+                self._scrub_resume = True
+            self.player.seek(t)
+            self._show_time(t)
+            self._request_preview()
+            return
+        self.player.seek(t)
+        self._show_time(t)
+        if getattr(self, "_scrub_resume", False) or was:
+            self._scrub_resume = False
+            if not self.player.playing:
+                self.player.play()
+            self._started()
+        else:
+            self._request_preview()
+
+    def _on_timeline_pick(self, k):
+        if 0 <= k < len(self.caps):
+            self.tree.selection_set(str(k))
+            self.tree.see(str(k))
+            if self.player is not None:
+                self.player.seek(min(self.caps[k]["start"] + 0.12, self.caps[k]["end"]))
+                self._show_time()
+                if not self.player.playing:
+                    self._request_preview()
+
+    def _update_buttons(self):
+        busy = self.running
+        has_file = self.video is not None
+        self.go_btn.set_enabled(has_file and not busy)
+        self.open_subs_btn.config(state="normal" if has_file and not busy else "disabled")
+        self.choose_btn.config(state="disabled" if busy else "normal")
+        self.save_btn.set_enabled(bool(self.caps) and not busy)
+        sel = self.editing is not None and not busy
+        for b in self.edit_btns + self.edge_btns:
+            b.config(state="normal" if sel else "disabled")
+        playable = has_file and not busy
+        self.play_btn.set_enabled(playable)
+        for b in self.transport:
+            b.config(state="normal" if playable else "disabled")
+        state = "normal" if sel else "disabled"
+        self.text_w.config(state=state, bg="#ffffff" if sel else THEME["bg"])
+        for e in (self.start_e, self.end_e):
+            e.config(state=state)
+
+    # ---- the paused frame ---------------------------------------------------------- #
+    def _request_preview(self):
+        """While paused: the frame at the playhead, with the captions as the player draws them."""
+        if not getattr(self, "screen", None) or not self.video or not self.video["info"]["width"]:
+            return
+        if self.player is not None and self.player.playing:
+            return
+        t = self.player.clock() if self.player else 0.0
+        near = [dict(c) for c in self.caps if c["end"] >= t - 1 and c["start"] <= t + 1]
+        with self.preview_cv:
+            self.preview_req = (self.video["path"], self.video["info"], t, near, self._shown_style(),
+                                self.player.size)
+            self.preview_cv.notify()
+
+    def _preview_worker(self):
+        while True:
+            with self.preview_cv:
+                while self.preview_req is None:
+                    self.preview_cv.wait()
+                req, self.preview_req = self.preview_req, None
+            time.sleep(0.08)  # typing or scrubbing: wait for a pause
+            with self.preview_cv:
+                if self.preview_req is not None:
+                    continue
+            try:
+                im = self._render_preview(*req)
+                self.ui(lambda im=im: self._show_frame(im))
+            except Exception as e:
+                log_error(f"Preview: {type(e).__name__}: {e}")
+
+    def _render_preview(self, path, info, t, caps, style, size):
+        import io
+        pw, ph = size
+        t = max(0.0, min(t, (info.get("duration") or 0) - 0.25))  # past the last frame there's nothing to show
+        # Seeking restarts the frame clock at 0: put it back on the video's time for the captions.
+        vf = f"scale={pw}:{ph},setpts=PTS+{max(0.0, t):.3f}/TB"
+        cwd = None
+        if caps:
+            cwd = prepare_subs_dir(caps, info["width"], info["height"], style)
+            vf += "," + SUB_FILTER
+        try:
+            r = subprocess.run([self.ffmpeg, "-nostdin", "-v", "error", "-ss", f"{max(0.0, t):.3f}", "-i", path,
+                                "-frames:v", "1", "-vf", vf, "-f", "image2pipe", "-c:v", "png", "pipe:1"],
+                               capture_output=True, timeout=30, cwd=cwd, **_POPEN_FLAGS)
+        finally:
+            if cwd:
+                shutil.rmtree(cwd, ignore_errors=True)
+        if not r.stdout:
+            raise RuntimeError(r.stderr.decode("utf-8", "replace")[-300:])
+        return Image.open(io.BytesIO(r.stdout)).convert("RGB")
+
+    def _show_frame(self, im):
+        if self.player is not None and self.player.playing:
+            return  # the player draws its own
+        self.video_photo = ImageTk.PhotoImage(im)
+        self.screen.config(image=self.video_photo, text="")
+
+    def on_close(self):
+        if self.running and not messagebox.askyesno("Still working", "Stop and close?"):
+            return
+        if not self.running and not self._confirm_discard():
+            return
+        self.cancel()
+        if self.player is not None:
+            self.player.stop()
+        self.root.destroy()
+
+
     def _required_missing(self):
-        return [m for m in self.missing if m != "tkinterdnd2"]
+        return [m for m in self.missing if m not in ("tkinterdnd2", "sounddevice")]  # both optional
 
     # ---- dependency installer ------------------------------------------ #
     def offer_install(self):
@@ -854,153 +2193,6 @@ class SubtitleApp:
                                  "\n\nTry running this in a terminal:\n"
                                  f'"{sys.executable}" -m pip install ' + " ".join(PACKAGES))
 
-    # ---- layout --------------------------------------------------------- #
-    def _build_ui(self):
-        pad = {"padx": 6, "pady": 3}
-        main = ttk.Frame(self.root, padding=10)
-        main.pack(fill="both", expand=True)
-        main.columnconfigure(0, weight=1)
-        main.rowconfigure(2, weight=1)
-
-        # 1. Video
-        f = ttk.LabelFrame(main, text="1. Video or audio", padding=8)
-        f.grid(row=0, column=0, sticky="ew", **pad)
-        f.columnconfigure(1, weight=1)
-        self.choose_btn = ttk.Button(f, text="Choose…", command=self.pick_video)
-        self.choose_btn.grid(row=0, column=0, sticky="w")
-        self.file_lbl = ttk.Label(f, text="", font=("", 10, "bold"))
-        self.file_lbl.grid(row=0, column=1, sticky="w", padx=8)
-        self.drop_lbl = ttk.Label(f, text="", foreground="gray")
-        self.drop_lbl.grid(row=1, column=0, columnspan=3, sticky="w", pady=(4, 0))
-        self.open_subs_btn = ttk.Button(f, text="Open subtitle file…", command=self.open_subtitles)
-        self.open_subs_btn.grid(row=0, column=2, sticky="e")
-
-        # 2. Recognition
-        f = ttk.LabelFrame(main, text="2. Write the subtitles (runs on this computer)", padding=8)
-        f.grid(row=1, column=0, sticky="ew", **pad)
-        f.columnconfigure(5, weight=1)
-        ttk.Label(f, text="Model").grid(row=0, column=0, sticky="w", **pad)
-        ttk.Combobox(f, values=list(MODELS), textvariable=self.v["model"], state="readonly",
-                     width=32).grid(row=0, column=1, sticky="w", **pad)
-        ttk.Label(f, text="Language").grid(row=0, column=2, sticky="e", **pad)
-        ttk.Combobox(f, values=list(LANGUAGES), textvariable=self.v["language"], state="readonly",
-                     width=20, height=20).grid(row=0, column=3, sticky="w", **pad)
-        ttk.Label(f, text="Run on").grid(row=1, column=0, sticky="w", **pad)
-        self.device_cb = ttk.Combobox(f, values=[CPU_DEVICE] + ([GPU_DEVICE] if self.has_gpu else []),
-                                      textvariable=self.v["device"], state="readonly", width=32)
-        self.device_cb.grid(row=1, column=1, sticky="w", **pad)
-        ttk.Label(f, text="Captions").grid(row=1, column=2, sticky="e", **pad)
-        ttk.Combobox(f, values=list(CAPTION_MODES), textvariable=self.v["mode"], state="readonly",
-                     width=44).grid(row=1, column=3, columnspan=2, sticky="w", **pad)
-        self.go_btn = ttk.Button(f, text="Make subtitles", command=self.transcribe)
-        self.go_btn.grid(row=0, column=6, rowspan=2, sticky="e", padx=(6, 0))
-        self.model_lbl = ttk.Label(f, text="", foreground="gray", wraplength=900)
-        self.model_lbl.grid(row=2, column=0, columnspan=7, sticky="w", **pad)
-
-        # 3. Check and edit
-        f = ttk.LabelFrame(main, text="3. Check and fix", padding=8)
-        f.grid(row=2, column=0, sticky="nsew", **pad)
-        f.columnconfigure(0, weight=1)
-        f.rowconfigure(0, weight=1)
-        self.tree = ttk.Treeview(f, columns=("start", "end", "text"), show="headings", selectmode="browse")
-        for col, text, width, anchor, stretch in (("start", "Start", 80, "e", False), ("end", "End", 80, "e", False),
-                                                  ("text", "Caption", 400, "w", True)):
-            self.tree.heading(col, text=text)
-            self.tree.column(col, width=width, anchor=anchor, stretch=stretch)
-        self.tree.grid(row=0, column=0, sticky="nsew")
-        sb = ttk.Scrollbar(f, orient="vertical", command=self.tree.yview)
-        sb.grid(row=0, column=1, sticky="ns")
-        self.tree.configure(yscrollcommand=sb.set)
-        self.tree.bind("<<TreeviewSelect>>", lambda e: self._on_select())
-        self.tree.bind("<Double-1>", lambda e: self.play_line())
-        self.list_lbl = ttk.Label(f, text="", foreground="gray")
-        self.list_lbl.grid(row=1, column=0, columnspan=2, sticky="w", pady=(4, 0))
-
-        side = ttk.Frame(f)
-        side.grid(row=0, column=2, rowspan=2, sticky="nsew", padx=(10, 0))
-        self.preview = tk.Label(side, bg="#202020", width=self.PREVIEW_W, height=self.PREVIEW_H,
-                                text="", fg="#bbbbbb")
-        self.preview.grid(row=0, column=0, columnspan=4, sticky="n")
-        self.preview.grid_propagate(False)
-        ed = ttk.Frame(side)
-        ed.grid(row=1, column=0, columnspan=4, sticky="ew", pady=(8, 0))
-        ed.columnconfigure(5, weight=1)
-        ttk.Label(ed, text="From").grid(row=0, column=0, sticky="w")
-        self.start_e = ttk.Entry(ed, width=11)
-        self.start_e.grid(row=0, column=1, sticky="w", padx=(4, 10))
-        ttk.Label(ed, text="to").grid(row=0, column=2, sticky="w")
-        self.end_e = ttk.Entry(ed, width=11)
-        self.end_e.grid(row=0, column=3, sticky="w", padx=4)
-        for e in (self.start_e, self.end_e):
-            e.bind("<Return>", lambda ev: self._apply_times())
-            e.bind("<FocusOut>", lambda ev: self._apply_times())
-        self.play_btn = ttk.Button(ed, text="▶ Play", width=7, command=self.play_line)
-        self.play_btn.grid(row=0, column=5, sticky="e")
-        self.text_w = tk.Text(ed, height=3, width=46, wrap="word", font=("", 11), undo=True,
-                              relief="solid", borderwidth=1)
-        self.text_w.grid(row=1, column=0, columnspan=6, sticky="ew", pady=(6, 4))
-        self.text_w.bind("<KeyRelease>", lambda e: self._apply_text())
-        btns = ttk.Frame(ed)
-        btns.grid(row=2, column=0, columnspan=6, sticky="ew")
-        self.edit_btns = []
-        for text, cmd in (("Split at cursor", self.split_line), ("Join with next", self.merge_next),
-                          ("Delete", self.delete_line)):
-            b = ttk.Button(btns, text=text, command=cmd)
-            b.pack(side="left", padx=(0, 6))
-            self.edit_btns.append(b)
-        self.edit_hint = ttk.Label(ed, text="Click a caption to fix it. Double-click (or ▶) to hear it.",
-                                   foreground="gray", wraplength=self.PREVIEW_W)
-        self.edit_hint.grid(row=3, column=0, columnspan=6, sticky="w", pady=(6, 0))
-
-        # 4. Save
-        f = ttk.LabelFrame(main, text="4. Save", padding=8)
-        f.grid(row=3, column=0, sticky="ew", **pad)
-        f.columnconfigure(0, weight=1)
-        outs = ttk.Frame(f)
-        outs.grid(row=0, column=0, sticky="w", **pad)
-        for key, text in (("srt", "Subtitle file (.srt)"), ("vtt", "Web subtitle file (.vtt)"),
-                          ("track", "Video with subtitles you can switch on"),
-                          ("burn", "Video with captions burned in")):
-            self.__dict__[f"{key}_cb"] = ttk.Checkbutton(outs, text=text, variable=self.v[key])
-            self.__dict__[f"{key}_cb"].pack(side="left", padx=(0, 18))
-        look = self.look_frame = ttk.Frame(f)
-        look.grid(row=1, column=0, sticky="w", **pad)
-        ttk.Label(look, text="Burned-in look:").pack(side="left", padx=(0, 8))
-        for label, key, values, width in (("Font", "font", self.fonts, 12), ("Size", "size", list(SIZES), 10),
-                                          ("Style", "look", LOOKS, 18), ("Position", "position", list(POSITIONS), 8)):
-            ttk.Label(look, text=label).pack(side="left", padx=(6, 3))
-            ttk.Combobox(look, values=values, textvariable=self.v[key], state="readonly", width=width).pack(side="left")
-        ttk.Checkbutton(look, text="Bold", variable=self.v["bold"]).pack(side="left", padx=(10, 6))
-        ttk.Label(look, text="Colour").pack(side="left", padx=(6, 3))
-        self.swatch = tk.Label(look, width=3, relief="solid", borderwidth=1, bg=self.v["colour"].get(), cursor="hand2")
-        self.swatch.pack(side="left")
-        self.swatch.bind("<Button-1>", lambda e: self.pick_colour())
-        where = ttk.Frame(f)
-        where.grid(row=2, column=0, sticky="ew", **pad)
-        where.columnconfigure(2, weight=1)
-        ttk.Radiobutton(where, text="Next to the video", value="same", variable=self.v["where"]).grid(row=0, column=0, sticky="w")
-        ttk.Radiobutton(where, text="In this folder:", value="folder", variable=self.v["where"]).grid(row=0, column=1, sticky="w", padx=(12, 4))
-        self.dir_e = ttk.Entry(where, textvariable=self.v["out_dir"])
-        self.dir_e.grid(row=0, column=2, sticky="ew")
-        self.dir_btn = ttk.Button(where, text="Choose…", command=self.pick_folder)
-        self.dir_btn.grid(row=0, column=3, padx=6)
-        self.save_btn = ttk.Button(where, text="Save", command=self.save)
-        self.save_btn.grid(row=0, column=4, padx=(6, 0))
-
-        f = ttk.Frame(main)
-        f.grid(row=4, column=0, sticky="ew", **pad)
-        f.columnconfigure(0, weight=1)
-        self.progress = ttk.Progressbar(f, mode="determinate", maximum=1000)
-        self.progress.grid(row=0, column=0, sticky="ew", padx=(0, 6))
-        self.cancel_btn = ttk.Button(f, text="Cancel", command=self.cancel, state="disabled")
-        self.cancel_btn.grid(row=0, column=1)
-        foot = ttk.Frame(main)  # the status line, with the support link on its right
-        foot.grid(row=5, column=0, sticky="ew", **pad)
-        foot.columnconfigure(0, weight=1)
-        self.status = ttk.Label(foot, text="Ready.", wraplength=850)
-        self.status.grid(row=0, column=0, sticky="w")
-        support_link(foot).grid(row=0, column=1, sticky="ne", padx=(12, 0))
-
     # ---- settings helpers ------------------------------------------------ #
     def _on_model(self):
         cfg = MODELS[self.v["model"].get()]
@@ -1016,30 +2208,10 @@ class SubtitleApp:
         self.dir_e.config(state=state)
         self.dir_btn.config(state=state)
 
-    def _on_outputs(self):
-        burn = self.v["burn"].get()
-        for w in self.look_frame.winfo_children():
-            try:
-                w.config(state=("readonly" if isinstance(w, ttk.Combobox) else "normal") if burn else "disabled")
-            except tk.TclError:
-                pass
-        self._request_preview()
-
-    def pick_colour(self):
-        if not self.v["burn"].get():
-            return
-        _, hexcode = colorchooser.askcolor(color=self.v["colour"].get(), title="Caption colour")
-        if hexcode:
-            self.v["colour"].set(hexcode)
-
     def pick_folder(self):
         d = filedialog.askdirectory(title="Choose output folder", initialdir=self.v["out_dir"].get())
         if d:
             self.v["out_dir"].set(d)
-
-    def _style(self):
-        return dict(font=self.v["font"].get(), size=self.v["size"].get(), bold=self.v["bold"].get(),
-                    colour=self.v["colour"].get(), look=self.v["look"].get(), position=self.v["position"].get())
 
     def ui(self, fn):
         """Run fn on the UI thread (Tkinter isn't thread-safe; workers only queue callbacks)."""
@@ -1086,29 +2258,6 @@ class SubtitleApp:
                                        "Continue and lose them?")
         return True
 
-    def _use_file(self, path):
-        if self.running or self._required_missing() or not self.ffmpeg:
-            if self._required_missing():
-                self.offer_install()
-            return
-        if not self._confirm_discard():
-            return
-        info = probe_media(self.ffmpeg, path)
-        if info["error"]:
-            messagebox.showwarning("Can't use this file", f"{os.path.basename(path)}: {info['error']}")
-            return
-        self.video = dict(path=path, info=info)
-        self._set_caps([], dirty=False)
-        self.lang = None
-        kind = f"{info['width']}×{info['height']} video" if info["width"] else "audio"
-        self.file_lbl.config(text=f"{os.path.basename(path)}   ({kind}, {fmt_duration(info['duration'])})")
-        for key in ("track", "burn"):
-            self.__dict__[f"{key}_cb"].config(state="normal" if info["width"] else "disabled")
-            if not info["width"]:
-                self.v[key].set(False)
-        self.status.config(text="Click Make subtitles, or Open subtitle file to use ones you already have.")
-        self._update_buttons()
-
     def open_subtitles(self):
         if self.running:
             return
@@ -1140,25 +2289,6 @@ class SubtitleApp:
         self._set_caps(caps, dirty=False)
         self.status.config(text=f"Opened {len(caps)} captions from {os.path.basename(path)}.")
 
-    # ---- the caption list -------------------------------------------------- #
-    def _set_caps(self, caps, dirty=True, keep=None):
-        self.caps = caps
-        self.dirty = dirty
-        self.tree.delete(*self.tree.get_children())
-        for i, c in enumerate(caps):
-            self.tree.insert("", "end", iid=str(i), values=self._row(c))
-        if keep is not None and caps:
-            k = str(min(keep, len(caps) - 1))
-            self.tree.selection_set(k)
-            self.tree.see(k)
-        else:
-            self._load_editor(None)
-        self._update_list_label()
-        self._update_buttons()
-
-    def _row(self, c):
-        return (fmt_short(c["start"]), fmt_short(c["end"]), c["text"].replace("\n", "  ⏎  "))
-
     def _update_list_label(self):
         if not self.caps:
             text = "The captions appear here as they're written." if self.video else ""
@@ -1168,193 +2298,6 @@ class SubtitleApp:
                 text += f", {LANG_NAMES.get(self.lang, self.lang)}"
             text += ". " + ("Edited — not saved yet." if self.dirty else "")
         self.list_lbl.config(text=text)
-
-    def _sel(self):
-        sel = self.tree.selection()
-        return int(sel[0]) if sel else None
-
-    def _on_select(self):
-        self._load_editor(self._sel())
-
-    def _load_editor(self, k):
-        self.editing = k if k is not None and k < len(self.caps) else None
-        self.text_w.config(state="normal")  # a disabled widget ignores changes
-        for e in (self.start_e, self.end_e):
-            e.config(state="normal")
-        for e in (self.start_e, self.end_e):
-            e.delete(0, "end")
-        self.text_w.delete("1.0", "end")
-        if k is not None and k < len(self.caps):
-            c = self.caps[k]
-            self.start_e.insert(0, fmt_ts(c["start"], "."))
-            self.end_e.insert(0, fmt_ts(c["end"], "."))
-            self.text_w.insert("1.0", c["text"])
-            self.text_w.edit_reset()
-        self._update_buttons()
-        self._request_preview()
-
-    def _apply_text(self):
-        k = self.editing
-        if k is None or k >= len(self.caps) or self.running:
-            return
-        text = self.text_w.get("1.0", "end-1c").strip()
-        if text and text != self.caps[k]["text"]:
-            self.caps[k]["text"] = text
-            self.tree.item(str(k), values=self._row(self.caps[k]))
-            self.dirty = True
-            self._update_list_label()
-            self._request_preview()
-
-    def _apply_times(self):
-        k = self.editing
-        if k is None or k >= len(self.caps) or self.running:
-            return
-        c = self.caps[k]
-        try:
-            start, end = parse_ts(self.start_e.get()), parse_ts(self.end_e.get())
-            if end <= start:
-                raise ValueError
-        except ValueError:
-            self.edit_hint.config(text="Times look like 00:01:02.500 (hours:minutes:seconds), and the end must "
-                                       "be after the start.", foreground="red")
-            return
-        self.edit_hint.config(text="Click a caption to fix it. Double-click (or ▶) to hear it.", foreground="gray")
-        if abs(start - c["start"]) < 0.0005 and abs(end - c["end"]) < 0.0005:
-            return
-        c["start"], c["end"] = start, end
-        order = sorted(range(len(self.caps)), key=lambda i: self.caps[i]["start"])
-        self._set_caps([self.caps[i] for i in order], keep=order.index(k))
-
-    def split_line(self):
-        k = self.editing
-        if k is None or self.running:
-            return
-        c = self.caps[k]
-        text = self.text_w.get("1.0", "end-1c")
-        pos = len(self.text_w.get("1.0", "insert"))
-        a, b = text[:pos].strip(), text[pos:].strip()
-        if not a or not b:
-            self.edit_hint.config(text="Put the text cursor where the caption should be split.", foreground="red")
-            return
-        mid = c["start"] + (c["end"] - c["start"]) * len(a) / max(1, len(a) + len(b))
-        m = CAPTION_MODES[self.v["mode"].get()]
-        first = dict(start=c["start"], end=mid, text=break_lines(a.replace("\n", " "), m["line"], m["lines"]))
-        second = dict(start=mid, end=c["end"], text=break_lines(b.replace("\n", " "), m["line"], m["lines"]))
-        self._set_caps(self.caps[:k] + [first, second] + self.caps[k + 1:], keep=k)
-
-    def merge_next(self):
-        k = self.editing
-        if k is None or k + 1 >= len(self.caps) or self.running:
-            return
-        a, b = self.caps[k], self.caps[k + 1]
-        m = CAPTION_MODES[self.v["mode"].get()]
-        text = (a["text"] + " " + b["text"]).replace("\n", " ")
-        merged = dict(start=a["start"], end=max(a["end"], b["end"]), text=break_lines(text, m["line"], 2))
-        self._set_caps(self.caps[:k] + [merged] + self.caps[k + 2:], keep=k)
-
-    def delete_line(self):
-        k = self.editing
-        if k is None or self.running:
-            return
-        self._set_caps(self.caps[:k] + self.caps[k + 1:], keep=k if k < len(self.caps) - 1 else k - 1)
-
-    def play_line(self):
-        k = self._sel()
-        if k is None or not self.video:
-            return
-        c = self.caps[k]
-        start = max(0.0, c["start"] - 0.15)
-        dur = c["end"] - start + 0.25
-        wav = os.path.join(self.tmp, f"line{int(time.time() * 1000) % 100000}.wav")
-
-        def work():
-            try:
-                subprocess.run([self.ffmpeg, "-nostdin", "-v", "error", "-y", "-ss", f"{start:.3f}", "-t", f"{dur:.3f}",
-                                "-i", self.video["path"], "-vn", "-ac", "2", "-ar", "44100", "-c:a", "pcm_s16le", wav],
-                               capture_output=True, timeout=60, **_POPEN_FLAGS)
-                if os.path.exists(wav):
-                    self.ui(lambda: self.player.play(wav))
-            except Exception as e:
-                log_error(f"Play: {type(e).__name__}: {e}")
-        threading.Thread(target=work, daemon=True).start()
-
-    def _update_buttons(self):
-        busy = self.running
-        has_file = self.video is not None
-        self.go_btn.config(state="normal" if has_file and not busy else "disabled")
-        self.open_subs_btn.config(state="normal" if has_file and not busy else "disabled")
-        self.choose_btn.config(state="disabled" if busy else "normal")
-        self.save_btn.config(state="normal" if self.caps and not busy else "disabled")
-        sel = self.editing is not None and not busy
-        for b in self.edit_btns + [self.play_btn]:
-            b.config(state="normal" if sel else "disabled")
-        state = "normal" if sel else "disabled"
-        self.text_w.config(state=state)
-        for e in (self.start_e, self.end_e):
-            e.config(state=state)
-
-    # ---- preview ------------------------------------------------------------ #
-    def _request_preview(self):
-        """Show the selected caption on its frame, as it will look burned in."""
-        if not self.video or not self.video["info"]["width"]:
-            self.preview.config(image="", text="(audio file: no picture)" if self.video else "")
-            return
-        k = self._sel()
-        if k is not None and k < len(self.caps):
-            c = dict(self.caps[k])
-            t = (c["start"] + c["end"]) / 2
-        else:
-            c, t = None, min(5.0, self.video["info"]["duration"] / 2)
-        with self.preview_cv:
-            self.preview_req = (self.video["path"], self.video["info"], t, c, self._style(), self.v["burn"].get())
-            self.preview_cv.notify()
-
-    def _preview_worker(self):
-        while True:
-            with self.preview_cv:
-                while self.preview_req is None:
-                    self.preview_cv.wait()
-                req, self.preview_req = self.preview_req, None
-            time.sleep(0.12)  # typing: wait for a pause
-            with self.preview_cv:
-                if self.preview_req is not None:
-                    continue
-            try:
-                im = self._render_preview(*req)
-                self.ui(lambda im=im: self._show_preview(im))
-            except Exception as e:
-                log_error(f"Preview: {type(e).__name__}: {e}")
-
-    def _render_preview(self, path, info, t, cap, style, burn):
-        import io
-        w, h = info["width"], info["height"]
-        scale = min(self.PREVIEW_W / w, self.PREVIEW_H / h)
-        pw, ph = max(2, int(w * scale) // 2 * 2), max(2, int(h * scale) // 2 * 2)
-        vf = f"scale={pw}:{ph}"
-        cwd = None
-        if cap is not None:
-            shown = dict(cap, start=0, end=36000)
-            if burn:
-                cwd = prepare_subs_dir([shown], w, h, style)
-            else:  # not burning in: show it in a plain player-like style
-                cwd = prepare_subs_dir([shown], w, h, dict(font=self.fonts[0], size="Medium", bold=False,
-                                                           colour="#ffffff", look="Box behind the text",
-                                                           position="Bottom"))
-            vf += "," + SUB_FILTER
-        try:
-            r = subprocess.run([self.ffmpeg, "-nostdin", "-v", "error", "-ss", f"{max(0.0, t):.3f}", "-i", path,
-                                "-frames:v", "1", "-vf", vf, "-f", "image2pipe", "-c:v", "png", "pipe:1"],
-                               capture_output=True, timeout=30, cwd=cwd, **_POPEN_FLAGS)
-        finally:
-            if cwd:
-                shutil.rmtree(cwd, ignore_errors=True)
-        if not r.stdout:
-            raise RuntimeError(r.stderr.decode("utf-8", "replace")[-300:])
-        return Image.open(io.BytesIO(r.stdout)).convert("RGB")
-
-    def _show_preview(self, im):
-        self.preview_photo = ImageTk.PhotoImage(im)
-        self.preview.config(image=self.preview_photo, text="")
 
     # ---- making subtitles ---------------------------------------------------- #
     def _confirm_downloads(self, cfg, gpu):
@@ -1630,17 +2573,6 @@ class SubtitleApp:
         self.status.config(text=f"Unexpected error: {val}")
         messagebox.showerror("Unexpected error", detail[-1500:])
 
-    def on_close(self):
-        if self.running and not messagebox.askyesno("Still working", "Stop and close?"):
-            return
-        if not self.running and not self._confirm_discard():
-            return
-        self.cancel()
-        self.player.stop()
-        shutil.rmtree(self.tmp, ignore_errors=True)
-        self.root.destroy()
-
-
 LOG_PATH = os.path.join(tempfile.gettempdir(), "subtitle_generator_errors.log")
 
 
@@ -1674,8 +2606,8 @@ def _say(text):
 
 def self_test():
     """Used by the release build: exit code 0 if the packaged app can download the
-    Fast model, read a video's sound, run Whisper on it, burn in captions and add a
-    subtitle track, and load drag and drop."""
+    Fast model, read a video's sound, run Whisper on it, burn in animated captions, add a
+    subtitle track, load the player's sound library and drag and drop."""
     try:
         if load_libraries():
             return 1
@@ -1708,7 +2640,11 @@ def self_test():
                 [dict(start=c["start"], end=c["end"], text=c["text"]) for c in caps]:
             return 5
         style = dict(font=available_fonts()[0], size="Large", bold=True, colour="#ffff00", look="Outline",
-                     position="Bottom")
+                     position="Bottom", animation="Highlight each word", highlight="#4da3ff")
+        if sum(1 for line in to_ass(caps, 640, 360, style).splitlines() if line.startswith("Dialogue")) != 4:
+            return 8  # one event per word
+        _say("animated captions OK; checking the player's sound library")
+        import sounddevice  # noqa: F401  (bundled with its PortAudio library)
         d = prepare_subs_dir([dict(start=0, end=3, text="Self test")], 640, 360, style)
         burned = os.path.join(tmp, "burned.mp4")
         r = subprocess.run([ffmpeg, "-v", "error", "-y", "-i", video, "-vf", SUB_FILTER, "-c:v", "libx264", "-c:a",
@@ -1776,13 +2712,11 @@ def main():
         code = self_test()
         _say(f"finished with code {code}")
         quit_now(code)
-    root = tk.Tk()
-    try:  # nicer native look where available
-        ttk.Style().theme_use("vista" if sys.platform == "win32" else "aqua" if sys.platform == "darwin" else "clam")
-    except tk.TclError:
-        pass
-    root.geometry("1120x820")
-    root.minsize(1000, 720)
+    root = tk.Tk()  # the theme is set by the app (apply_theme)
+    sw, sh = root.winfo_screenwidth(), root.winfo_screenheight()
+    w, h = min(1260, sw - 40), min(960, sh - 80)
+    root.geometry(f"{w}x{h}+{max(0, (sw - w) // 2)}+{max(0, (sh - h) // 3)}")
+    root.minsize(1080, 760)
     app = SubtitleApp(root)
     files = [a for a in sys.argv[1:] if os.path.isfile(a)]
     if files:

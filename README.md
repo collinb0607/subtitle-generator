@@ -2,17 +2,18 @@
 
 **Free, offline alternative to paid auto-subtitle sites. No per-minute fees, no watermark, no uploads.**
 
-![Subtitle Generator: open a video, watch the captions being written, fix one, pick a burned-in style and save](docs/demo.gif)
+![Subtitle Generator: open a video, watch the captions being written, pick an animated style, play it, fix a caption and save](docs/demo.gif)
 
 Listens to a video (or audio file) and writes its subtitles with **OpenAI's Whisper** speech
-recognition, running on your own computer, in 99 languages. Check and fix every caption with a live
-preview, then save:
+recognition, running on your own computer, in 99 languages. Watch it back in the built-in player
+with the captions drawn live, fix anything on a timeline, give them an animated look, then save:
 
 - a **subtitle file** (`.srt`, for YouTube, VLC, Premiere and most players, or `.vtt` for the web)
 - a **video with subtitles you can switch on**: added as a track, with no re-encoding, so it's
   quick and loses no quality
-- a **video with the captions burned in**, for TikTok, Reels and Shorts, in your choice of font,
-  size, colour, style and position
+- a **video with the captions burned in**, for TikTok, Reels and Shorts: plain, or **animated word
+  by word** (karaoke highlight, words popping in, or one big word at a time), from one-click looks
+  or your own font, size, colours, style and position
 
 Your video never leaves your computer. Works on Windows and macOS, and on Windows PCs with an
 NVIDIA graphics card it runs on the card, about 20 times as fast as the video plays.
@@ -52,9 +53,17 @@ says so and uses the processor instead. Macs and other graphics cards use the pr
    **Sentences, up to 2 lines** (YouTube, films), or **Short phrases, 1 line** (Shorts, Reels,
    TikTok). Captions follow the speech: they break at the ends of sentences and at pauses, and stay
    on screen long enough to read. They appear in the list as they're written.
-3. **Check and fix.** Click a caption to see it on its frame, exactly as it will look burned in.
-   Type to fix words; change its times; **Split at cursor**, **Join with next** or **Delete**.
-   Double-click a caption (or **▶ Play**) to hear that moment.
+3. **Check and fix** in the player: the video plays with its sound and the captions drawn exactly
+   as they'll be burned in, animations and all, and the caption being spoken lights up in the list.
+   - **Space** plays and pauses; the arrow keys skip 2 seconds; double-click a caption to play just
+     that one.
+   - The **timeline** shows every caption as a block: click one to pick it, click or drag anywhere
+     else to jump there.
+   - Type to fix words. Change a caption's times by typing them, or while watching: **Start here**
+     (`[`) and **End here** (`]`) set them to the player's position, and **− 0.1 s** / **+ 0.1 s**
+     move the caption. **Split at cursor**, **Join with next** and **Delete** do what they say.
+   - Every caption keeps the time of each word, so the animations stay in step: edit the text and
+     the words you didn't change keep their exact times.
 4. **Save** any of the four outputs, next to the video or in a folder you choose: `talk.mp4` gives
    `talk.srt`, `talk.vtt`, `talk (subtitles).mp4` and `talk (captions).mp4`. Naming the subtitle
    file like the video means players such as VLC show it automatically.
@@ -62,18 +71,28 @@ says so and uses the processor instead. Macs and other graphics cards use the pr
 Already have subtitles? **Open subtitle file** loads an `.srt` or `.vtt`, to fix it, add it to
 the video as a track, or burn it in.
 
-**Burned-in look:** Arial, Verdana, Trebuchet MS, Georgia or Impact; four sizes (scaled to the
-video, so vertical videos look right too); bold; any colour; an **outline**, a **box behind the
-text**, or a **shadow**; at the bottom, middle or top. The burned-in video is H.264 MP4 at high
-quality; the sound is copied as it is when it can be.
+**Burned-in captions:**
+- **Looks** set everything at once: **Clean** (white with an outline), **Karaoke** (each word lights
+  up as it's spoken), **Bold pop** (big words that pop in one by one), **One word** (a single big
+  word at a time, for fast-paced Shorts) and **Boxed** (white on a dark box). Change anything after
+  and it becomes **Custom**.
+- **Animation:** none, highlight each word, words pop in, or one word at a time, with your choice of
+  **word colour**.
+- Arial, Verdana, Trebuchet MS, Georgia or Impact; four sizes (scaled to the video, so vertical
+  videos look right too); bold; any colour; an **outline**, a **box behind the text**, or a
+  **shadow**; at the bottom, middle or top.
+
+Animations are for the burned-in video: `.srt`, `.vtt` and subtitle tracks can't animate, so they
+show the plain text. The burned-in video is H.264 MP4 at high quality; the sound is copied as it is
+when it can be.
 
 ## Run from source (Python)
 ### Setup (one time)
 1. Install **Python 3.9+** from https://python.org. On Windows, tick **"Add Python to PATH"** during install.
 2. Run the app (see below). The first time, it asks to install **faster-whisper** (Whisper, with
    CTranslate2), **imageio-ffmpeg** (FFmpeg, which reads the sound and makes the videos), **Pillow**
-   (the preview), **certifi** (for the model download) and **tkinterdnd2** (drag and drop). Click
-   **Yes**; it's about a 150 MB download.
+   (the player's picture), **certifi** (for the model download), **sounddevice** (the player's
+   sound) and **tkinterdnd2** (drag and drop). Click **Yes**; it's about a 150 MB download.
 
 ### Run
 ```
@@ -104,7 +123,9 @@ Speech recognition is [Whisper](https://github.com/openai/whisper) by OpenAI (MI
 [Systran/faster-whisper-small](https://huggingface.co/Systran/faster-whisper-small) and
 [dropbox-dash/faster-whisper-large-v3-turbo](https://huggingface.co/dropbox-dash/faster-whisper-large-v3-turbo)
 (MIT). Videos are made with [FFmpeg](https://ffmpeg.org) (via imageio-ffmpeg) and
-[libass](https://github.com/libass/libass). NVIDIA's cuBLAS is downloaded from NVIDIA's own package,
+[libass](https://github.com/libass/libass), and the player's sound is played with
+[sounddevice](https://github.com/spatialaudio/python-sounddevice) and PortAudio (MIT). NVIDIA's
+cuBLAS is downloaded from NVIDIA's own package,
 under NVIDIA's licence, only if you choose the graphics card.
 
 ## Support this project
