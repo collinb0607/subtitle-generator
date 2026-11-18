@@ -845,7 +845,7 @@ THEME = dict(
     bg="#f3f1f9", card="#ffffff", border="#e2ddf0", text="#1c1433", muted="#6e6787",
     purple="#2b1655", purple2="#4a2a8a", blue="#2f7cf6", blue_hover="#1d67dc", blue_soft="#e7f0ff",
     blue_text="#1756c4", lavender="#d9ccff", lavender_line="#7b5cd6", disabled="#c9c4d8", now="#f1ecff",
-    video="#140b2b")
+    video="#140b2b", sash="#e6e1f3")
 
 
 def ui_family():
@@ -1376,7 +1376,7 @@ class Timeline(tk.Canvas):
             self.on_seek(max(0.0, min(self.duration, (e.x - 8) / (w - 16) * self.duration)), done=True)
             return
         hit = [tag for item in self.find_overlapping(e.x, e.y, e.x, e.y) for tag in self.gettags(item)
-               if tag.startswith("c") and tag != "cap"]
+               if re.fullmatch(r"c\d+", tag)]  # not "cap", nor the "current" Tk adds on macOS
         if hit and 14 <= e.y <= 44:
             self.on_pick(int(hit[-1][1:]))
             return
@@ -1486,16 +1486,19 @@ class SubtitleApp:
         t, fam = THEME, self.family
         import webbrowser
         header(self.root, lambda: webbrowser.open(SUPPORT_URL)).pack(fill="x")
-        main = tk.Frame(self.root, bg=t["bg"])
-        main.pack(fill="both", expand=True, padx=14, pady=(12, 6))
+        # The sections stack in a pane you can resize: drag the bars between them.
+        self.vpane = vpane = tk.PanedWindow(self.root, orient="vertical", bg=t["sash"], bd=0, sashwidth=9,
+                                            sashrelief="flat", opaqueresize=True, sashcursor="sb_v_double_arrow")
+        vpane.pack(fill="both", expand=True, padx=14, pady=(12, 6))
+        main = tk.Frame(vpane, bg=t["bg"])
         main.columnconfigure(0, weight=2)
         main.columnconfigure(1, weight=3)
-        main.rowconfigure(1, weight=1)
+        main.rowconfigure(0, weight=1)
         gap = 6
 
         # 1. Video
         c1, f, _ = card(main, 1, "Video or audio")
-        c1.grid(row=0, column=0, sticky="nsew", padx=(0, gap), pady=(0, gap * 2))
+        c1.grid(row=0, column=0, sticky="nsew", padx=(0, gap))
         f.columnconfigure(1, weight=1)
         self.choose_btn = ttk.Button(f, text="Choose…", command=self.pick_video)
         self.choose_btn.grid(row=0, column=0, sticky="w")
@@ -1508,7 +1511,7 @@ class SubtitleApp:
 
         # 2. Recognition
         c2, f, _ = card(main, 2, "Write the subtitles")
-        c2.grid(row=0, column=1, sticky="nsew", padx=(gap, 0), pady=(0, gap * 2))
+        c2.grid(row=0, column=1, sticky="nsew", padx=(gap, 0))
         f.columnconfigure(4, weight=1)
         rows = (("Model", "model", list(MODELS), 33, 0, 0), ("Language", "language", list(LANGUAGES), 20, 0, 2),
                 ("Run on", "device", [CPU_DEVICE] + ([GPU_DEVICE] if self.has_gpu else []), 33, 1, 0),
@@ -1525,34 +1528,45 @@ class SubtitleApp:
         self.model_lbl.grid(row=2, column=0, columnspan=6, sticky="w", pady=(6, 0))
 
         # 3. Check and fix: the list, the player, the editor, the timeline
-        c3, f, _ = card(main, 3, "Check and fix")
-        c3.grid(row=1, column=0, columnspan=2, sticky="nsew", pady=(0, gap * 2))
+        c3, f, _ = card(vpane, 3, "Check and fix")
         f.columnconfigure(0, weight=1)
         f.rowconfigure(0, weight=1)
-        listf = ttk.Frame(f, style="Card.TFrame")
-        listf.grid(row=0, column=0, sticky="nsew")
-        listf.columnconfigure(0, weight=1)
-        listf.rowconfigure(0, weight=1)
-        self.tree = ttk.Treeview(listf, columns=("start", "end", "text"), show="headings", selectmode="browse")
+        # The list and the player side by side, with a bar between them to drag.
+        hpane = tk.PanedWindow(f, orient="horizontal", bg=t["card"], bd=0, sashwidth=14, sashrelief="flat",
+                               opaqueresize=True, sashcursor="sb_h_double_arrow")
+        hpane.grid(row=0, column=0, sticky="nsew")
+        # The left side: the list above the editor, with a bar between them to drag too.
+        listf = tk.PanedWindow(hpane, orient="vertical", bg=t["card"], bd=0, sashwidth=12, sashrelief="flat",
+                               opaqueresize=True, sashcursor="sb_v_double_arrow")
+        treef = ttk.Frame(listf, style="Card.TFrame")
+        treef.columnconfigure(0, weight=1)
+        treef.rowconfigure(0, weight=1)
+        self.tree = ttk.Treeview(treef, columns=("start", "end", "text"), show="headings", selectmode="browse")
         for col, text, width, anchor, stretch in (("start", "Start", 78, "e", False), ("end", "End", 78, "e", False),
                                                   ("text", "Caption", 360, "w", True)):
             self.tree.heading(col, text=text, anchor="w" if col == "text" else "e")
             self.tree.column(col, width=width, anchor=anchor, stretch=stretch)
         self.tree.tag_configure("now", background=t["now"])
         self.tree.grid(row=0, column=0, sticky="nsew")
-        sb = ttk.Scrollbar(listf, orient="vertical", command=self.tree.yview)
+        sb = ttk.Scrollbar(treef, orient="vertical", command=self.tree.yview)
         sb.grid(row=0, column=1, sticky="ns")
         self.tree.configure(yscrollcommand=sb.set)
         self.tree.bind("<<TreeviewSelect>>", lambda e: self._on_select())
         self.tree.bind("<Double-1>", lambda e: self.play_line())
-        self.list_lbl = ttk.Label(listf, text="", style="Muted.Card.TLabel")
+        self.list_lbl = ttk.Label(treef, text="", style="Muted.Card.TLabel")
         self.list_lbl.grid(row=1, column=0, columnspan=2, sticky="w", pady=(6, 0))
 
-        side = ttk.Frame(f, style="Card.TFrame")
-        side.grid(row=0, column=1, sticky="nsew", padx=(16, 0))
-        box = tk.Frame(side, bg=t["video"], width=self.VIDEO_W, height=self.VIDEO_H)
-        box.grid(row=0, column=0, sticky="n")
+        side = ttk.Frame(hpane, style="Card.TFrame")
+        side.columnconfigure(0, weight=1)
+        side.rowconfigure(0, weight=1)
+        hpane.add(listf, minsize=240, stretch="always")
+        hpane.add(side, minsize=340, stretch="always")
+        self.hpane = hpane
+        # The picture fills whatever room it's given (keeping its shape): drag the bars to make it bigger.
+        box = self.video_box = tk.Frame(side, bg=t["video"], width=self.VIDEO_W, height=self.VIDEO_H)
+        box.grid(row=0, column=0, sticky="nsew")
         box.pack_propagate(False)
+        box.bind("<Configure>", lambda e: self._video_box_resized())
         self.screen = tk.Label(box, bg=t["video"], bd=0, fg="#a99fd0", text="Open a video to see it here",
                                font=(fam, 10))
         self.screen.pack(fill="both", expand=True)
@@ -1570,31 +1584,36 @@ class SubtitleApp:
         self.time_lbl = ttk.Label(bar, text="0:00.0 / 0:00.0", style="Muted.Card.TLabel", width=17, anchor="e")
         self.time_lbl.pack(side="right")
 
-        ed = ttk.Frame(side, style="Card.TFrame")
-        ed.grid(row=2, column=0, sticky="ew", pady=(10, 0))
+        ed = ttk.Frame(listf, style="Card.TFrame")  # under the list, so the picture gets the height
+        listf.add(treef, minsize=70, stretch="always")
+        listf.add(ed, minsize=90, stretch="never")
         ed.columnconfigure(5, weight=1)
-        ttk.Label(ed, text="From", style="Card.TLabel").grid(row=0, column=0, sticky="w")
-        self.start_e = ttk.Entry(ed, width=12)
+        # The caption's times sit under the player: they go with where it's playing.
+        tf = ttk.Frame(side, style="Card.TFrame")
+        tf.grid(row=2, column=0, sticky="ew", pady=(8, 0))
+        tf.columnconfigure(4, weight=1)
+        ttk.Label(tf, text="From", style="Card.TLabel").grid(row=0, column=0, sticky="w")
+        self.start_e = ttk.Entry(tf, width=12)
         self.start_e.grid(row=0, column=1, sticky="w", padx=(6, 4))
-        ttk.Label(ed, text="to", style="Card.TLabel").grid(row=0, column=2, sticky="w", padx=(4, 0))
-        self.end_e = ttk.Entry(ed, width=12)
+        ttk.Label(tf, text="to", style="Card.TLabel").grid(row=0, column=2, sticky="w", padx=(4, 0))
+        self.end_e = ttk.Entry(tf, width=12)
         self.end_e.grid(row=0, column=3, sticky="w", padx=6)
         for e in (self.start_e, self.end_e):
             e.bind("<Return>", lambda ev: self._apply_times())
             e.bind("<FocusOut>", lambda ev: self._apply_times())
-        times = ttk.Frame(ed, style="Card.TFrame")
-        times.grid(row=0, column=5, sticky="e")
+        times = ttk.Frame(tf, style="Card.TFrame")
+        times.grid(row=1, column=0, columnspan=5, sticky="w", pady=(6, 0))
         self.edge_btns = []
         for text, cmd in (("Start here [", lambda: self.set_edge("start")), ("End here ]", lambda: self.set_edge("end")),
                           ("− 0.1 s", lambda: self.nudge(-0.1)), ("+ 0.1 s", lambda: self.nudge(0.1))):
             b = ttk.Button(times, text=text, command=cmd)
-            b.pack(side="left", padx=(4, 0))
+            b.pack(side="left", padx=(0, 4))
             self.edge_btns.append(b)
-        self.text_w = tk.Text(ed, height=3, width=46, wrap="word", font=(fam, 12), undo=True, relief="flat",
+        self.text_w = tk.Text(ed, height=2, width=46, wrap="word", font=(fam, 12), undo=True, relief="flat",
                               highlightthickness=1, highlightbackground=t["border"], highlightcolor=t["blue"],
                               bg="#ffffff", fg=t["text"], insertbackground=t["blue"], padx=8, pady=6,
                               selectbackground=t["blue_soft"], selectforeground=t["text"])
-        self.text_w.grid(row=1, column=0, columnspan=6, sticky="ew", pady=(8, 6))
+        self.text_w.grid(row=1, column=0, columnspan=6, sticky="ew", pady=(0, 6))
         self.text_w.bind("<KeyRelease>", lambda e: self._apply_text())
         btns = ttk.Frame(ed, style="Card.TFrame")
         btns.grid(row=2, column=0, columnspan=6, sticky="ew")
@@ -1604,15 +1623,18 @@ class SubtitleApp:
             b = ttk.Button(btns, text=text, command=cmd)
             b.pack(side="left", padx=(0, 6))
             self.edit_btns.append(b)
-        self.edit_hint = ttk.Label(btns, text="Space plays and pauses. Double-click a caption to hear it.",
+        self.edit_hint = ttk.Label(btns, text="Space: play / pause",
                                    style="Muted.Card.TLabel")
         self.edit_hint.pack(side="right")
         self.timeline = Timeline(f, self._on_timeline_seek, self._on_timeline_pick)
-        self.timeline.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(12, 0))
+        self.timeline.grid(row=1, column=0, sticky="ew", pady=(12, 0))
 
         # 4. Save
-        c4, f, _ = card(main, 4, "Save")
-        c4.grid(row=2, column=0, columnspan=2, sticky="ew")
+        c4, f, _ = card(vpane, 4, "Save")
+        vpane.add(main, minsize=110, stretch="never")
+        vpane.add(c3, minsize=200, stretch="always")
+        vpane.add(c4, minsize=90, stretch="never")
+        self.root.after(150, self._place_sashes)
         f.columnconfigure(0, weight=1)
         outs = ttk.Frame(f, style="Card.TFrame")
         outs.grid(row=0, column=0, sticky="w")
@@ -1668,6 +1690,59 @@ class SubtitleApp:
         self.progress.grid(row=0, column=2, sticky="e", padx=(12, 8))
         self.cancel_btn = ttk.Button(foot, text="Cancel", command=self.cancel, state="disabled")
         self.cancel_btn.grid(row=0, column=3, sticky="e")
+
+    def _place_sashes(self, tries=0):
+        """Start with the top and bottom cards at their natural height and "Check and fix" taking the
+        rest (at least 380 px: on a small screen the others give way). Drag the bars to change it."""
+        vp = self.vpane
+        self.root.update_idletasks()
+        total = vp.winfo_height()
+        if total < 300 and tries < 20:  # not on screen yet
+            return self.root.after(100, lambda: self._place_sashes(tries + 1))
+        panes = [self.root.nametowidget(str(p)) for p in vp.panes()]
+        top, bottom = panes[0].winfo_reqheight(), panes[2].winfo_reqheight()
+        sash = int(vp.cget("sashwidth"))
+        want = 380  # "Check and fix" at least this tall, if the screen allows
+        mid = total - top - bottom - 2 * sash
+        if mid < want:  # the top cards give way first (the Save button must stay in view)
+            top = max(110, top - (want - mid))
+            mid = total - top - bottom - 2 * sash
+        if mid < 260:  # a very short screen: Save gives way too (drag the bars to see it)
+            bottom = max(90, bottom - (260 - mid))
+            mid = max(200, total - top - bottom - 2 * sash)
+        for pane, h in zip(panes, (top, mid, bottom)):
+            vp.paneconfigure(pane, height=h)
+
+    def _box_size(self):
+        box = getattr(self, "video_box", None)
+        if box is None or box.winfo_width() < 20:
+            return self.VIDEO_W, self.VIDEO_H
+        return box.winfo_width(), box.winfo_height()
+
+    def _fit_video(self, info):
+        bw, bh = self._box_size()
+        scale = min(bw / info["width"], bh / info["height"])
+        return max(2, int(info["width"] * scale) // 2 * 2), max(2, int(info["height"] * scale) // 2 * 2)
+
+    def _video_box_resized(self):
+        """The picture's box changed size (a bar was dragged, the window resized): fit the video to it."""
+        if getattr(self, "_fit_job", None):
+            self.root.after_cancel(self._fit_job)
+        self._fit_job = self.root.after(150, self._refit_video)
+
+    def _refit_video(self):
+        self._fit_job = None
+        if not self.video or not self.video["info"]["width"] or self.player is None:
+            return
+        size = self._fit_video(self.video["info"])
+        if abs(size[0] - self.player.size[0]) < 6 and abs(size[1] - self.player.size[1]) < 6:
+            return
+        self.player.size = size
+        self.video_photo = None
+        if self.player.playing:
+            self.player.refresh()
+        else:
+            self._request_preview()
 
     def _swatch(self, parent, label, key):
         ttk.Label(parent, text=label, style="Card.TLabel").pack(side="left", padx=(12, 4))
@@ -1788,11 +1863,7 @@ class SubtitleApp:
             self.__dict__[f"{key}_cb"].config(state="normal" if info["width"] else "disabled")
             if not info["width"]:
                 self.v[key].set(False)
-        if info["width"]:
-            scale = min(self.VIDEO_W / info["width"], self.VIDEO_H / info["height"])
-            size = (max(2, int(info["width"] * scale) // 2 * 2), max(2, int(info["height"] * scale) // 2 * 2))
-        else:
-            size = (2, 2)
+        size = self._fit_video(info) if info["width"] else (2, 2)
         self.player.load(path, info, size, self._player_subs)
         self.video_photo = None
         self._set_caps([], dirty=False)
