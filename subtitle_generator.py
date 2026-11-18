@@ -54,7 +54,7 @@ FILE_TYPES = [("Videos and audio", " ".join("*" + e for e in sorted(VIDEO_EXTS |
 HOME = os.path.join(os.path.expanduser("~"), ".subtitle-generator")
 SAMPLE_RATE = 16000  # what Whisper listens at
 
-# The Whisper models, converted for CTranslate2 (MIT licence), pinned to an exact
+# The Whisper models, converted for CTranslate2 (MIT license), pinned to an exact
 # version. Every file is checked against its SHA-256 after downloading.
 HF = "https://huggingface.co/{repo}/resolve/{rev}/{file}"
 MODELS = {
@@ -98,7 +98,7 @@ LANGUAGES = {"Detect automatically": None, "English": "en", "Spanish": "es", "Fr
              "Malay": "ms", "Catalan": "ca", "Croatian": "hr", "Serbian": "sr", "Bulgarian": "bg",
              "Slovak": "sk", "Persian": "fa", "Urdu": "ur", "Bengali": "bn", "Tamil": "ta"}
 LANG_NAMES = {v: k for k, v in LANGUAGES.items() if v}
-# ISO 639-2 codes, for labelling the subtitle track inside a video.
+# ISO 639-2 codes, for labeling the subtitle track inside a video.
 ISO3 = {"en": "eng", "es": "spa", "fr": "fre", "de": "ger", "it": "ita", "pt": "por", "nl": "dut", "pl": "pol",
         "ru": "rus", "uk": "ukr", "tr": "tur", "ar": "ara", "hi": "hin", "ja": "jpn", "ko": "kor", "zh": "chi",
         "vi": "vie", "id": "ind", "th": "tha", "sv": "swe", "no": "nor", "da": "dan", "fi": "fin", "el": "gre",
@@ -356,7 +356,7 @@ def break_lines(text, line_len, max_lines):
 
 
 def build_captions(words, mode):
-    """Group recognised words (start, end, text-with-its-leading-space) into captions:
+    """Group recognized words (start, end, text-with-its-leading-space) into captions:
     a list of dict(start, end, text). Breaks at sentence ends, pauses, the length
     limit and the time limit, so each caption is easy to read in time."""
     m = CAPTION_MODES[mode]
@@ -431,7 +431,7 @@ def even_words(tokens, start, end):
 
 
 def caption_words(c):
-    """The caption's words with times: its recognised ones if they still match the text,
+    """The caption's words with times: its recognized ones if they still match the text,
     else shared out evenly (an opened .srt, or text typed in)."""
     words, tokens = c.get("words"), _tokens(c["text"])
     if words and [w[2] for w in words] == tokens:
@@ -441,7 +441,7 @@ def caption_words(c):
 
 def retime_words(old_words, new_text, start, end):
     """Word times for edited text: words that didn't change keep their times; new ones
-    share out the time between their neighbours (by length)."""
+    share out the time between their neighbors (by length)."""
     import difflib
     new = _tokens(new_text)
     old = [w[2] for w in old_words]
@@ -563,7 +563,7 @@ def _animated_events(c, st):
     toks = _ass_lines(c)
     if not words or len(words) != len(toks):
         return [(c["start"], c["end"], _ass_text(c["text"]))]
-    hi = "&H" + _ass_colour(st.get("highlight") or "#4da3ff")[4:]  # an override's colour: &HBBGGRR&
+    hi = "&H" + _ass_colour(st.get("highlight") or "#4da3ff")[4:]  # an override's color: &HBBGGRR&
     anim = st["animation"]
     events = []
     for i, w in enumerate(words):
@@ -580,7 +580,7 @@ def _animated_events(c, st):
                 if anim == "Highlight each word" and k == i:
                     word = "{\\c" + hi + "&}" + word + "{\\r}"
                 elif anim == "Words pop in":
-                    if k == i:  # the newest word fades in, in the highlight colour
+                    if k == i:  # the newest word fades in, in the highlight color
                         word = "{\\alpha&HFF&\\c" + hi + "&\\t(0,80,\\alpha&H00&)}" + word + "{\\r}"
                     elif k > i:  # words still to come keep their place but don't show, so nothing jumps
                         word = "{\\alpha&HFF&}" + word + "{\\r}"
@@ -675,7 +675,7 @@ def _ssl_context():
 
 def download_file(url, dest, size, sha256, on_progress, check_cancel):
     """Download to dest, checking its SHA-256. Written under a temporary name, so a
-    cancelled or broken download is never used."""
+    canceled or broken download is never used."""
     import urllib.request
     os.makedirs(os.path.dirname(dest), exist_ok=True)
     part = dest + ".part"
@@ -907,7 +907,7 @@ def _indicator_images(root, style):
 
 
 def apply_theme(root):
-    """ttk's "clam" theme, recoloured (the native themes ignore colours)."""
+    """ttk's "clam" theme, recoloured (the native themes ignore colors)."""
     t, fam = THEME, ui_family()
     root.configure(bg=t["bg"])
     s = ttk.Style(root)
@@ -1660,13 +1660,13 @@ class SubtitleApp:
                 ttk.Combobox(line, values=values, textvariable=self.v[key], state="readonly",
                              width=width).pack(side="left")
             if r == 0:
-                self._swatch(line, "Word colour", "highlight")
+                self._swatch(line, "Word color", "highlight")
                 self.anim_note = ttk.Label(line, text="", style="Muted.Card.TLabel")
                 self.anim_note.pack(side="left", padx=(12, 0))
             else:
                 ttk.Checkbutton(line, text="Bold", variable=self.v["bold"], style="Card.TCheckbutton").pack(
                     side="left", padx=(12, 0))
-                self._swatch(line, "Colour", "colour")
+                self._swatch(line, "Color", "colour")
         where = ttk.Frame(f, style="Card.TFrame")
         where.grid(row=2, column=0, sticky="ew", pady=(12, 0))
         where.columnconfigure(2, weight=1)
@@ -1809,7 +1809,7 @@ class SubtitleApp:
         if not self.v["burn"].get():
             return
         _, hexcode = colorchooser.askcolor(color=self.v[key].get(),
-                                           title="Caption colour" if key == "colour" else "Highlighted word colour")
+                                           title="Caption color" if key == "colour" else "Highlighted word color")
         if hexcode:
             self.v[key].set(hexcode)
 
@@ -2445,7 +2445,7 @@ class SubtitleApp:
             secs = time.monotonic() - t0
             self.ui(lambda: self._transcribed(caps, secs, duration, note))
         except Cancelled:
-            self.ui(lambda: self._finish("Cancelled."))
+            self.ui(lambda: self._finish("Canceled."))
         except Exception as e:
             log_error(f"Transcribe {self.video['path']}\n{type(e).__name__}: {e}")
             self.ui(lambda e=e: self._finish(f"Couldn't make subtitles: {explain_error(e)}", error=True))
@@ -2561,7 +2561,7 @@ class SubtitleApp:
                 first = first or path
             self.ui(lambda: self._saved(done, first))
         except Cancelled:
-            self.ui(lambda: self._finish("Cancelled." + (f" Saved: {', '.join(done)}." if done else "")))
+            self.ui(lambda: self._finish("Canceled." + (f" Saved: {', '.join(done)}." if done else "")))
         except Exception as e:
             log_error(f"Save\n{type(e).__name__}: {e}")
             self.ui(lambda e=e: self._finish(f"Couldn't save: {explain_error(e)}", error=True))

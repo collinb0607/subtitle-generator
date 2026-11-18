@@ -13,7 +13,7 @@ with the captions drawn live, fix anything on a timeline, give them an animated 
   quick and loses no quality
 - a **video with the captions burned in**, for TikTok, Reels and Shorts: plain, or **animated word
   by word** (karaoke highlight, words popping in, or one big word at a time), from one-click looks
-  or your own font, size, colours, style and position
+  or your own font, size, colors, style and position
 
 Your video never leaves your computer. Works on Windows and macOS, and on Windows PCs with an
 NVIDIA graphics card it runs on the card, about 20 times as fast as the video plays.
@@ -77,9 +77,9 @@ the video as a track, or burn it in.
   word at a time, for fast-paced Shorts) and **Boxed** (white on a dark box). Change anything after
   and it becomes **Custom**.
 - **Animation:** none, highlight each word, words pop in, or one word at a time, with your choice of
-  **word colour**.
+  **word color**.
 - Arial, Verdana, Trebuchet MS, Georgia or Impact; four sizes (scaled to the video, so vertical
-  videos look right too); bold; any colour; an **outline**, a **box behind the text**, or a
+  videos look right too); bold; any color; an **outline**, a **box behind the text**, or a
   **shadow**; at the bottom, middle or top.
 
 Animations are for the burned-in video: `.srt`, `.vtt` and subtitle tracks can't animate, so they
@@ -111,7 +111,7 @@ install the components once more. The install dialog shows which Python it insta
 - **"No speech was found":** the sound may be music only, very quiet, or silent.
 - **"Not enough memory":** use the **Fast** model, or close other programs.
 - **The model download fails:** check your internet connection and try again. A failed or
-  cancelled download is never used.
+  canceled download is never used.
 - **Something fails with no message:** errors are also written to `subtitle_generator_errors.log`
   in your temp folder. On Windows, paste `%TEMP%\subtitle_generator_errors.log` into File Explorer's
   address bar. On Mac, run `open $TMPDIR/subtitle_generator_errors.log`.
@@ -126,7 +126,7 @@ Speech recognition is [Whisper](https://github.com/openai/whisper) by OpenAI (MI
 [libass](https://github.com/libass/libass), and the player's sound is played with
 [sounddevice](https://github.com/spatialaudio/python-sounddevice) and PortAudio (MIT). NVIDIA's
 cuBLAS is downloaded from NVIDIA's own package,
-under NVIDIA's licence, only if you choose the graphics card.
+under NVIDIA's license, only if you choose the graphics card.
 
 ## Support this project
 This app is free, with no ads, accounts or limits. If it saved you time or a subscription, you can
