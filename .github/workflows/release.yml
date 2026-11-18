@@ -38,7 +38,7 @@ jobs:
       - name: Build (Windows)
         if: runner.os == 'Windows'
         run: |
-          pyinstaller --noconfirm --onefile --windowed --name Subtitle-Generator --collect-all ctranslate2 --collect-data faster_whisper --collect-data imageio_ffmpeg --collect-data _sounddevice_data subtitle_generator.py
+          pyinstaller --noconfirm --icon assets/icon.ico --onefile --windowed --name Subtitle-Generator --collect-all ctranslate2 --collect-data faster_whisper --collect-data imageio_ffmpeg --collect-data _sounddevice_data subtitle_generator.py
           Move-Item dist/Subtitle-Generator.exe ${{ matrix.asset }}
 
       - name: Build (macOS)
@@ -46,7 +46,7 @@ jobs:
         # A .app bundle (one-dir: macOS apps are folders). ditto keeps the
         # permissions and code signature that a plain zip would lose.
         run: |
-          pyinstaller --noconfirm --windowed --name "Subtitle Generator" --collect-all ctranslate2 --collect-data faster_whisper --collect-data imageio_ffmpeg --collect-data _sounddevice_data subtitle_generator.py
+          pyinstaller --noconfirm --icon assets/icon.icns --windowed --name "Subtitle Generator" --collect-all ctranslate2 --collect-data faster_whisper --collect-data imageio_ffmpeg --collect-data _sounddevice_data subtitle_generator.py
           ditto -c -k --keepParent "dist/Subtitle Generator.app" ${{ matrix.asset }}
 
       # Smoke test: the app must start and still be running after 20 s
